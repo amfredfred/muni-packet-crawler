@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS packets (
     reviewed INTEGER DEFAULT 0,
     UNIQUE(meeting_id, url)
 );
+
+-- Single-row table: the CHECK makes a second row impossible outright, so
+-- "registered" is simply "does this one row exist" — no separate flag to
+-- get out of sync. To allow a new registration, delete the row directly
+-- (sqlite3 data/muni.db "DELETE FROM auth_totp") and the webapp falls back
+-- to showing the setup page again on the next visit.
+CREATE TABLE IF NOT EXISTS auth_totp (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    secret TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Added after the initial schema — kept as migrations rather than folded into
@@ -60,6 +71,14 @@ MIGRATIONS = [
     # that referenced it. municipality_id + a real dedup index fixes that.
     ("packets", "municipality_id", "ALTER TABLE packets ADD COLUMN municipality_id INTEGER"),
     ("packets", "board_type", "ALTER TABLE packets ADD COLUMN board_type TEXT"),
+    # PDF content review (see pdf_review.py / review_packets.py): NULL
+    # review_method means not yet reviewed. priority=1 is the actionable
+    # signal — a packet whose PDF names a specific applicant/owner (e.g. a
+    # liquor-license application), surfaced for follow-up ahead of routine
+    # agendas. This is a best-effort text/OCR heuristic, not a verified fact.
+    ("packets", "review_method", "ALTER TABLE packets ADD COLUMN review_method TEXT"),
+    ("packets", "applicant_snippet", "ALTER TABLE packets ADD COLUMN applicant_snippet TEXT"),
+    ("packets", "priority", "ALTER TABLE packets ADD COLUMN priority INTEGER DEFAULT 0"),
 ]
 
 

@@ -17,6 +17,9 @@
       <option value="unknown" {{ 'selected' if which == 'unknown' }}>Unknown date</option>
       <option value="all" {{ 'selected' if which == 'all' }}>All (upcoming + unknown)</option>
     </select>
+    <label class="muted" style="font-size:13px">within
+      <input type="number" name="within_days" value="{{ within_days }}" min="0" style="width:60px" title="0 = no cap"> days
+    </label>
     <select name="reviewed" onchange="this.form.submit()">
       <option value="" {{ 'selected' if reviewed == '' }}>Any review state</option>
       <option value="0" {{ 'selected' if reviewed == '0' }}>Unreviewed</option>
@@ -48,9 +51,9 @@
     {% endfor %}
   </table>
   <div class="pagination">
-    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, page=page-1) }}">← prev</a>{% endif %}
+    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, within_days=within_days, page=page-1) }}">← prev</a>{% endif %}
     <span class="muted">page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, page=page+1) }}">next →</a>{% endif %}
+    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, within_days=within_days, page=page+1) }}">next →</a>{% endif %}
   </div>
 </div>
 

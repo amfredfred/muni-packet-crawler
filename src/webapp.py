@@ -4,28 +4,124 @@ start/stop the crawl engine, and a browser for the municipalities/meetings/
 packets tables with the ability to mark packets reviewed, force a
 re-crawl, or manually add/delete a municipality.
 
+Gated by single-admin TOTP (Google Authenticator-style) — see auth.py for
+the registration/login model. First visit with no admin registered shows
+the setup page (QR code); every visit after that requires a 6-digit code.
+
 Run with: python src/webapp.py, then open http://localhost:5000
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import auth
 from crawl_sites import BOARD_KEYWORDS
 from db import get_connection
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_PATH = BASE_DIR / "data" / "crawl_engine.log"
+SECRET_KEY_PATH = BASE_DIR / "data" / ".flask_secret_key"
 PAGE_SIZE = 50
 
+
+def _load_or_create_secret_key() -> bytes:
+    """A hardcoded Flask secret_key would let anyone who's read this file
+    forge the session cookie that marks a visitor as TOTP-authenticated —
+    defeating the whole point of gating the app. Persisted here (not
+    regenerated per run) so logged-in sessions survive a restart."""
+    SECRET_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if SECRET_KEY_PATH.exists():
+        return SECRET_KEY_PATH.read_bytes()
+    key = os.urandom(32)
+    SECRET_KEY_PATH.write_bytes(key)
+    return key
+
+
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
-app.secret_key = "local-only-control-panel"
+app.secret_key = _load_or_create_secret_key()
 
 _engine_proc: subprocess.Popen | None = None
 _engine_desc: str = ""
+
+_UNAUTHED_ENDPOINTS = {"setup", "login", "static"}
+
+
+@app.before_request
+def _require_auth():
+    if request.endpoint in _UNAUTHED_ENDPOINTS:
+        return None
+    conn = get_connection()
+    try:
+        if not auth.is_registered(conn):
+            return redirect(url_for("setup"))
+    finally:
+        conn.close()
+    if not session.get("authenticated"):
+        return redirect(url_for("login"))
+    return None
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    conn = get_connection()
+    try:
+        if auth.is_registered(conn):
+            # Setup already completed — the only way back here is deleting
+            # the auth_totp row directly in the database.
+            return redirect(url_for("login"))
+
+        if "pending_totp_secret" not in session:
+            session["pending_totp_secret"] = auth.generate_secret()
+        secret = session["pending_totp_secret"]
+
+        if request.method == "POST":
+            code = request.form.get("code", "")
+            if auth.verify_code(secret, code):
+                if auth.register_secret(conn, secret):
+                    session.pop("pending_totp_secret", None)
+                    session["authenticated"] = True
+                    flash("Authenticator registered. You're in.")
+                    return redirect(url_for("dashboard"))
+                flash("Setup already completed by another request — log in instead.")
+                return redirect(url_for("login"))
+            flash("That code didn't match. Check your authenticator app and try again.")
+
+        return render_template("setup.html", qr_data_uri=auth.qr_code_data_uri(secret), secret=secret)
+    finally:
+        conn.close()
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    conn = get_connection()
+    try:
+        if not auth.is_registered(conn):
+            return redirect(url_for("setup"))
+        if session.get("authenticated"):
+            return redirect(url_for("dashboard"))
+
+        if request.method == "POST":
+            code = request.form.get("code", "")
+            secret = auth.get_secret(conn)
+            if auth.verify_code(secret, code):
+                session["authenticated"] = True
+                return redirect(url_for("dashboard"))
+            flash("Invalid or expired code.")
+
+        return render_template("login.html")
+    finally:
+        conn.close()
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.pop("authenticated", None)
+    return redirect(url_for("login"))
 
 
 def dict_rows(cur) -> list[dict]:
@@ -262,12 +358,24 @@ def packets():
     which = request.args.get("which", "upcoming")
     reviewed = request.args.get("reviewed", "")
     board_type = request.args.get("board_type", "")
+    priority_only = request.args.get("priority_only", "")
+    within_days = request.args.get("within_days", "10")
     page = max(1, request.args.get("page", 1, type=int))
 
     where = []
     params: list = []
     if which == "upcoming":
         where.append("p.is_upcoming = 1")
+        # Caps the view to a near-term window so a real but distant agenda
+        # doesn't bury this week's — doesn't touch what's stored, so
+        # widening/clearing this later needs no re-crawl. Only meaningful
+        # for is_upcoming=1 rows (unknown-date rows have no meeting_date to
+        # compare, and NULL <= X is never true in SQL, so this must not be
+        # applied to the "unknown" branch — see list_upcoming.py's docstring
+        # for the same gotcha).
+        if within_days.strip().isdigit() and int(within_days) > 0:
+            where.append("p.meeting_date <= date('now', ?)")
+            params.append(f"+{int(within_days)} days")
     elif which == "unknown":
         where.append("p.is_upcoming IS NULL")
     # "all" -> no extra filter beyond the save-time exclusion of confirmed-past packets
@@ -280,6 +388,8 @@ def packets():
     if board_type:
         where.append("p.board_type = ?")
         params.append(board_type)
+    if priority_only == "1":
+        where.append("p.priority = 1")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     conn = get_connection()
@@ -317,6 +427,7 @@ def packets():
         which=which,
         reviewed=reviewed,
         board_type=board_type,
+        within_days=within_days,
         page=page,
         total=total,
         total_pages=total_pages,
@@ -333,5 +444,9 @@ def toggle_reviewed(packet_id: int):
     return redirect(next_url)
 
 
-if __name__ == "__main__":
+def main() -> None:
     app.run(debug=False, port=5000)
+
+
+if __name__ == "__main__":
+    main()

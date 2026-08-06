@@ -83,6 +83,7 @@ AGENDA_KEYWORDS = re.compile(
     re.I,
 )
 PDF_RE = re.compile(r"\.pdf($|[?#])", re.I)
+MEETING_DOC_RE = re.compile(r"\b(agenda|minutes|meeting|packet)\b", re.I)
 TEXT_MATCH_RE = re.compile(r"\b(packet|agenda)\b", re.I)
 # Excludes email/RSS signup links whose text happens to contain "agenda"
 # (e.g. "Receive Agenda Alerts") — these aren't packets, just noise that
@@ -124,6 +125,29 @@ BOARD_TYPE_RE = re.compile(r"\b(board|commission(?:ers)?)\b", re.I)
 
 def matches_board_filter(text: str) -> bool:
     return bool(BOARD_TOPIC_RE.search(text) and BOARD_TYPE_RE.search(text))
+
+
+# Small-town sites very often list every body's minutes on ONE shared page
+# (Council, Planning Commission, Historical Commission, Library Board, all
+# together) — so a page-level link like "Planning Commission" that got us
+# onto the page does NOT mean every packet found there is actually about
+# planning. Confirmed at scale: City/Village Council minutes were being
+# tagged "Planning and Zoning Commission" or "Historical Commission" across
+# many Michigan villages (Elberta, Gaylord, Bancroft, Essexville, Harbor
+# Beach, Grand Beach) purely because that's the page they happened to sit
+# on. A packet's OWN title/heading can name a body explicitly ("Council",
+# "Library Board", "Parks Board", "Budget Committee") without using any of
+# our topic words — when it does, that is a stronger, more specific signal
+# than the page-level context, and must override it rather than being OR'd
+# together with it.
+OTHER_BODY_TYPE_RE = re.compile(r"\b(board|commission(?:ers)?|council|committee|authority|trustees)\b", re.I)
+
+
+def names_other_body(text: str) -> bool:
+    """True when text explicitly names SOME governing body but not one of
+    ours — e.g. "Village Council", "Library Board" both have a type word
+    with no qualifying topic word alongside it."""
+    return bool(OTHER_BODY_TYPE_RE.search(text) and not BOARD_TOPIC_RE.search(text))
 
 
 # The exact 12 keywords from packet-finder-chrome-extension/data.json,
@@ -308,12 +332,48 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
 
         if is_pdf or is_text_match:
             if url not in seen_direct:
+                # own_title: the item's OWN specific identity — its link
+                # text and URL only. Deliberately excludes heading_text and
+                # page_context, both of which are shared by every other
+                # item in the same section/page: if a Council item's own
+                # title were merged with a surrounding "Planning Board"
+                # heading before checking names_other_body, the merged
+                # string would contain both a topic and a type word and
+                # wrongly look like it qualifies on its own — exactly how
+                # the first version of this fix still let Council items
+                # through when they sat under a qualifying heading rather
+                # than being reached via page_context. The disqualification
+                # check must run on the item's own text alone.
+                own_title = " ".join(filter(None, [text, url]))
                 heading_text = find_nearby_heading_text(a)
-                combined_context = " ".join(filter(None, [text, page_context, heading_text]))
-                if not matches_board_filter(combined_context):
-                    continue
-                seen_direct.add(url)
+                external_context = " ".join(filter(None, [heading_text, page_context]))
                 meeting_date = extract_meeting_date(a)
+
+                if names_other_body(own_title):
+                    # The item's own title names a specific body that
+                    # isn't ours (Council, Library Board, ...) — overrides
+                    # any qualifying heading/page context around it.
+                    continue
+                elif matches_board_filter(own_title):
+                    classify_context = own_title
+                elif matches_board_filter(external_context) and (
+                    MEETING_DOC_RE.search(own_title) or meeting_date is not None
+                ):
+                    # own_title is generic (bare "Agenda"/"PDF", no body
+                    # named at all) — fall back to the surrounding heading/
+                    # page context, but only when this item also looks
+                    # like an actual meeting document (has a meeting-ish
+                    # word or a real date), not unrelated archive ephemera.
+                    # Confirmed live: Historical Commission pages often
+                    # double as a town history archive (press clippings,
+                    # "directions to X"), which otherwise rode along on
+                    # the surrounding qualifying context with nothing to
+                    # flag them as non-meeting content.
+                    classify_context = external_context
+                else:
+                    continue
+
+                seen_direct.add(url)
                 direct.append(
                     {
                         "url": url,
@@ -321,7 +381,7 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
                         "match_reason": "pdf" if is_pdf else "text",
                         "meeting_date": meeting_date.isoformat() if meeting_date else None,
                         "is_upcoming": is_upcoming(meeting_date),
-                        "board_type": classify_board_type(combined_context),
+                        "board_type": classify_board_type(classify_context),
                     }
                 )
             continue
@@ -389,17 +449,30 @@ def save_meeting_and_packets(
     return packet_count
 
 
-def crawl_municipality(cur, muni_id: int, official_url: str) -> str:
+def crawl_municipality(official_url: str) -> dict:
+    """Pure network/parsing work — no database access. Deliberately kept
+    that way so this can run inside a thread pool: SQLite only allows one
+    writer at a time even in WAL mode, so having many worker threads each
+    write directly caused persistent 'database is locked' errors under
+    real concurrency once workers were added. All DB writes now happen in
+    a single caller thread (see process_one/main) after this returns.
+
+    status is only decided here for the two terminal cases that don't
+    depend on what actually gets saved ('error', 'no_agenda_found'); the
+    'ok' vs 'no_packets_found' call depends on how many packets survive the
+    past-meeting filter in save_meeting_and_packets, which only runs in the
+    writer thread — so that distinction is left as 'has_candidates' here
+    and finalized by the caller after the real save."""
+    result: dict = {"status": "error", "agenda_url": None, "platform": None, "meetings": []}
+
     home_resp = fetch(official_url)
     if home_resp is None:
-        return "error"
+        return result
 
     candidates = find_candidate_pages(home_resp.text, home_resp.url)
     if not candidates:
-        return "no_agenda_found"
-
-    total_packets = 0
-    winning_platform = None
+        result["status"] = "no_agenda_found"
+        return result
 
     for page_url, page_context in candidates[:CANDIDATE_PAGES_TO_VISIT]:
         page_resp = fetch(page_url)
@@ -418,36 +491,50 @@ def crawl_municipality(cur, muni_id: int, official_url: str) -> str:
             sub_direct, _ = extract_packets(sub_resp.text, sub_resp.url, sub_context)
             subpage_results.append((sub, sub_direct))
 
-        count = save_meeting_and_packets(cur, muni_id, page_resp.url, direct, subpage_results)
-        total_packets += count
-
-        hostname = urlparse(page_resp.url).hostname or ""
-        if is_civic_host(hostname) and winning_platform is None:
-            winning_platform = next(h for h in CIVIC_HOSTS if hostname.endswith(h))
-
-        cur.execute(
-            "UPDATE municipalities SET agenda_url = ?, platform = ? WHERE id = ? AND agenda_url IS NULL",
-            (page_resp.url, winning_platform, muni_id),
+        result["meetings"].append(
+            {"source_url": page_resp.url, "direct": direct, "subpage_results": subpage_results}
         )
 
-    return "ok" if total_packets > 0 else "no_packets_found"
+        if result["agenda_url"] is None:
+            result["agenda_url"] = page_resp.url
+            hostname = urlparse(page_resp.url).hostname or ""
+            if is_civic_host(hostname):
+                result["platform"] = next(h for h in CIVIC_HOSTS if hostname.endswith(h))
+
+    result["status"] = "has_candidates"
+    return result
 
 
-def process_one(muni_id: int, name: str, state: str, official_url: str) -> str:
-    """Runs one municipality end-to-end on its own SQLite connection —
-    required since connections can't be shared across threads. WAL mode +
-    busy_timeout (see db.get_connection) absorb the brief write conflicts
-    from multiple workers finishing at once."""
-    conn = get_connection()
-    cur = conn.cursor()
+def process_one(muni_id: int, name: str, state: str, official_url: str) -> tuple[int, dict]:
+    """Worker-side function: network/parsing only, no database access —
+    see crawl_municipality's docstring for why."""
     try:
-        status = crawl_municipality(cur, muni_id, official_url)
+        result = crawl_municipality(official_url)
     except Exception as e:
         print(f"  {name}, {state}: unexpected error ({e})")
-        status = "error"
-    cur.execute("UPDATE municipalities SET site_status = ? WHERE id = ?", (status, muni_id))
-    conn.commit()
-    conn.close()
+        result = {"status": "error", "agenda_url": None, "platform": None, "meetings": []}
+    return muni_id, result
+
+
+def write_result(cur, muni_id: int, result: dict) -> str:
+    """Writer-side: the only place that touches the database for crawl
+    results, called from a single thread (see main) so there is never more
+    than one writer, regardless of --workers."""
+    total_saved = 0
+    for m in result["meetings"]:
+        total_saved += save_meeting_and_packets(
+            cur, muni_id, m["source_url"], m["direct"], m["subpage_results"]
+        )
+
+    if result["status"] == "has_candidates":
+        status = "ok" if total_saved > 0 else "no_packets_found"
+    else:
+        status = result["status"]
+
+    cur.execute(
+        "UPDATE municipalities SET site_status = ?, agenda_url = ?, platform = ? WHERE id = ?",
+        (status, result["agenda_url"], result["platform"], muni_id),
+    )
     return status
 
 
@@ -478,7 +565,6 @@ def main() -> None:
 
     cur.execute(query, params)
     rows = cur.fetchall()
-    conn.close()
     print(f"crawling {len(rows)} municipalities with {args.workers} workers")
 
     status_counts: dict[str, int] = {}
@@ -490,10 +576,14 @@ def main() -> None:
         }
         for future in as_completed(futures):
             name, state = futures[future]
-            status = future.result()
+            muni_id, result = future.result()
+            status = write_result(cur, muni_id, result)  # main thread only — sole writer
+            conn.commit()
             done += 1
             status_counts[status] = status_counts.get(status, 0) + 1
             print(f"  [{done}/{len(rows)}] {name}, {state}: {status}")
+
+    conn.close()
 
     print("done —", status_counts)
 

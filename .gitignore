@@ -1,0 +1,17 @@
+*.pyc
+__pycache__/
+venv/
+*.egg-info/
+
+# Flask session-signing key (see webapp.py's _load_or_create_secret_key) —
+# a live security secret. Committing it would let anyone who reads the repo
+# forge an authenticated session cookie, bypassing the TOTP gate entirely.
+data/.flask_secret_key
+
+# Runtime log, not source
+data/crawl_engine.log
+
+# Runtime data, not source — also now holds the registered TOTP secret in
+# auth_totp once you complete 2FA setup (see auth.py), which must never
+# enter git history alongside the code that reads it.
+data/muni.db

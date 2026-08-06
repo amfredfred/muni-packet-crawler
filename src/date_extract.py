@@ -38,9 +38,19 @@ TEXT_DATE_RE = re.compile(
     rf"\b{ENGLISH_MONTHS}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}\b", re.I
 )
 ORDINAL_SUFFIX_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)\b", re.I)
-# Matches both slash and dash separated numeric dates, 2- or 4-digit year:
-# "07/20/2026", "8-8-23", "1-12-23". Assumes US month-day-year order.
-NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{2}|\d{4})\b")
+# Matches slash-, dash-, or dot-separated numeric dates, 2- or 4-digit year:
+# "07/20/2026", "8-8-23", "1-12-23", "1.14.2019" (dot form found live in
+# Mesilla, NM's minutes — was silently failing to parse, which meant old
+# 2018-era records defaulted to "unknown date" and survived the
+# past-meeting filter instead of being correctly excluded). Assumes US
+# month-day-year order. The separator is captured and back-referenced
+# (\2 twice) so it must be the SAME character both times — without that,
+# a WordPress upload path like ".../2026/03/12.29.25-Packet.pdf" matched
+# "03/12.29" by splicing the URL's own year/month folder together with
+# part of the filename's date, producing a nonsense result (parsed as
+# 2029-03-12 instead of the real 2025-12-29 sitting right there). Confirmed
+# live on Stockbridge, MI packets before this fix.
+NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})([-/.])(\d{1,2})\2(\d{2}|\d{4})\b")
 
 SPANISH_MONTHS = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -58,13 +68,28 @@ TEXT_DATE_FORMATS = ["%B %d %Y", "%b %d %Y"]
 ROW_TAGS = {"tr", "li", "article"}
 MAX_ANCESTOR_HOPS = 4
 
+# Defense-in-depth against any remaining false-positive match (regex bugs,
+# or a genuine typo on the source site — Goodrich, MI's own page literally
+# says "November 27, 3023"): a municipal board meeting more than ~2 years
+# out, or dated before this project existed, is far more likely a bad
+# parse than a real fact. Treated as unparseable (None) rather than kept.
+MIN_PLAUSIBLE_YEAR = 2015
+
+
+def _plausible(d: date | None) -> date | None:
+    if d is None:
+        return None
+    if MIN_PLAUSIBLE_YEAR <= d.year <= date.today().year + 2:
+        return d
+    return None
+
 
 def _try_parse_iso(text: str) -> date | None:
     m = ISO_ATTR_RE.search(text)
     if not m:
         return None
     try:
-        return datetime.fromisoformat(m.group(0)).date()
+        return _plausible(datetime.fromisoformat(m.group(0)).date())
     except ValueError:
         return None
 
@@ -73,12 +98,12 @@ def _try_parse_numeric(text: str) -> date | None:
     m = NUMERIC_DATE_RE.search(text)
     if not m:
         return None
-    month, day, year = m.groups()
+    month, _sep, day, year = m.groups()
     year_num = int(year)
     if year_num < 100:
         year_num += 2000
     try:
-        return date(year_num, int(month), int(day))
+        return _plausible(date(year_num, int(month), int(day)))
     except ValueError:
         return None
 
@@ -89,7 +114,7 @@ def _try_parse_spanish(text: str) -> date | None:
         return None
     day, month_name, year = m.groups()
     try:
-        return date(int(year), SPANISH_MONTHS[month_name.lower()], int(day))
+        return _plausible(date(int(year), SPANISH_MONTHS[month_name.lower()], int(day)))
     except ValueError:
         return None
 
@@ -105,7 +130,9 @@ def _try_parse_any(text: str) -> date | None:
         cleaned = re.sub(rf"\b({ENGLISH_MONTHS})\.", r"\1", cleaned, flags=re.I)
         for fmt in TEXT_DATE_FORMATS:
             try:
-                return datetime.strptime(cleaned, fmt).date()
+                parsed = _plausible(datetime.strptime(cleaned, fmt).date())
+                if parsed:
+                    return parsed
             except ValueError:
                 continue
     return _try_parse_numeric(text) or _try_parse_spanish(text)
