@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ m.name }}, {{ m.state }} — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<p><a href="{{ url_for('municipalities') }}">← back to municipalities</a></p>
+
+<div class="card">
+  <h2 style="margin-top:0">{{ m.name }}, {{ m.state }}</h2>
+  <p>
+    <a href="{{ m.official_url }}" target="_blank" rel="noopener">{{ m.official_url }}</a><br>
+    <span class="muted">type: {{ m.place_type }} &middot; source: {{ m.source }} &middot; platform: {{ m.platform or '—' }}</span>
+  </p>
+  <p>
+    status:
+    {% if m.site_status == 'ok' %}<span class="badge ok">ok</span>
+    {% elif m.site_status == 'error' %}<span class="badge err">error</span>
+    {% elif m.site_status == 'unchecked' %}<span class="badge muted">unchecked</span>
+    {% else %}<span class="badge warn">{{ m.site_status }}</span>{% endif %}
+  </p>
+  {% if m.agenda_url %}<p>agenda page: <a href="{{ m.agenda_url }}" target="_blank" rel="noopener">{{ m.agenda_url }}</a></p>{% endif %}
+
+  <form method="post" action="{{ url_for('municipality_recheck', muni_id=m.id) }}" class="inline">
+    <button type="submit" class="secondary">Mark for re-check</button>
+  </form>
+  <form method="post" action="{{ url_for('municipality_delete', muni_id=m.id) }}" class="inline"
+        onsubmit="return confirm('Delete {{ m.name }}, {{ m.state }} and all its meetings/packets?')">
+    <button type="submit" class="danger">Delete</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Packets ({{ packets|length }})</h3>
+  {% if packets %}
+  <table>
+    <tr><th>Date</th><th>Keyword</th><th>Title</th><th>Match</th><th>Via</th><th>Reviewed</th><th></th></tr>
+    {% for p in packets %}
+    <tr>
+      <td>{{ p.meeting_date or '?' }}</td>
+      <td class="muted">{{ p.board_type or '—' }}</td>
+      <td><a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.title|truncate(60) }}</a></td>
+      <td class="muted">{{ p.match_reason }}</td>
+      <td class="muted">{{ p.found_via }}</td>
+      <td>{{ 'yes' if p.reviewed else 'no' }}</td>
+      <td>
+        <form method="post" action="{{ url_for('toggle_reviewed', packet_id=p.id) }}" class="inline">
+          <input type="hidden" name="next" value="{{ request.path }}">
+          <button type="submit" class="secondary">{{ 'unmark' if p.reviewed else 'mark reviewed' }}</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No packets found yet for this municipality.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Municipalities — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card">
+  <form class="filters" method="get">
+    <select name="state" onchange="this.form.submit()">
+      <option value="">All states</option>
+      {% for s in all_states %}<option value="{{ s }}" {{ 'selected' if s == state }}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="status" onchange="this.form.submit()">
+      <option value="">Any status</option>
+      {% for s in all_statuses %}<option value="{{ s }}" {{ 'selected' if s == status }}>{{ s }}</option>{% endfor %}
+    </select>
+    <input type="text" name="q" placeholder="search name..." value="{{ q or '' }}">
+    <button type="submit">Filter</button>
+    <span class="muted">{{ total }} result(s)</span>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <tr><th>Name</th><th>State</th><th>Type</th><th>Site</th><th>Status</th><th>Platform</th><th>Source</th><th></th></tr>
+    {% for m in rows %}
+    <tr>
+      <td>{{ m.name }}</td>
+      <td>{{ m.state }}</td>
+      <td class="muted">{{ m.place_type }}</td>
+      <td><a href="{{ m.official_url }}" target="_blank" rel="noopener">{{ m.official_url|truncate(40) }}</a></td>
+      <td>
+        {% if m.site_status == 'ok' %}<span class="badge ok">ok</span>
+        {% elif m.site_status == 'error' %}<span class="badge err">error</span>
+        {% elif m.site_status == 'unchecked' %}<span class="badge muted">unchecked</span>
+        {% else %}<span class="badge warn">{{ m.site_status }}</span>{% endif %}
+      </td>
+      <td class="muted">{{ m.platform or '' }}</td>
+      <td class="muted">{{ m.source }}</td>
+      <td><a href="{{ url_for('municipality_detail', muni_id=m.id) }}">view</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <div class="pagination">
+    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('municipalities', state=state, status=status, q=q, page=page-1) }}">← prev</a>{% endif %}
+    <span class="muted">page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('municipalities', state=state, status=status, q=q, page=page+1) }}">next →</a>{% endif %}
+  </div>
+</div>
+
+{% endblock %}

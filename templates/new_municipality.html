@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Add Municipality — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card" style="max-width:480px">
+  <h2 style="margin-top:0">Add a municipality</h2>
+  <form method="post">
+    <p><label>Name<br><input type="text" name="name" required style="width:100%"></label></p>
+    <p><label>State<br><input type="text" name="state" required style="width:100%"></label></p>
+    <p><label>Place type<br>
+      <select name="place_type" style="width:100%">
+        <option value="city">city</option>
+        <option value="town">town</option>
+        <option value="village">village</option>
+        <option value="county">county</option>
+        <option value="district">district</option>
+      </select>
+    </label></p>
+    <p><label>Official URL<br><input type="url" name="official_url" required style="width:100%"></label></p>
+    <button type="submit">Add</button>
+  </form>
+</div>
+
+{% endblock %}

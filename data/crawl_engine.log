@@ -1,0 +1,2 @@
+C:\Users\manfr\AppData\Roaming\Python\Python312\site-packages\bs4\css.py:8: UserWarning: The soupsieve package is not installed. CSS selectors cannot be used.
+  warnings.warn(

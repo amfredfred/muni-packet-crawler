@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2 style="margin-top:0">Engine</h2>
+  <p>
+    Status:
+    {% if engine_running %}
+      <span class="badge ok">running</span> (PID {{ engine_pid }}{% if engine_state %}, {{ engine_state }}{% endif %})
+    {% else %}
+      <span class="badge muted">stopped</span>
+    {% endif %}
+  </p>
+  <form method="post" action="{{ url_for('engine_start') }}" class="filters">
+    <select name="state">
+      <option value="">All states</option>
+      {% for s in all_states %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+    </select>
+    <input type="number" name="limit" placeholder="limit (optional)" style="width:140px">
+    <label class="muted" style="font-size:13px"><input type="checkbox" name="recheck" value="1"> re-check already-crawled</label>
+    {% if engine_running %}
+      <button type="submit" disabled title="stop the engine first">Start crawl</button>
+    {% else %}
+      <button type="submit">Start crawl</button>
+    {% endif %}
+  </form>
+  {% if engine_running %}
+  <form method="post" action="{{ url_for('engine_stop') }}" style="margin-top:8px">
+    <button type="submit" class="danger">Stop crawl</button>
+  </form>
+  {% endif %}
+  {% if log_tail %}
+  <details style="margin-top:10px" {{ 'open' if engine_running }}>
+    <summary class="muted">log tail</summary>
+    <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ log_tail }}</pre>
+  </details>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Crawl status</h2>
+  <div class="stat-row">
+    {% for status, count in site_status_counts %}
+    <div class="stat">
+      <div class="n">{{ count }}</div>
+      <div class="l">{{ status }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Packets</h2>
+  <div class="stat-row">
+    <div class="stat"><div class="n">{{ total_packets }}</div><div class="l">total (upcoming/unknown only)</div></div>
+    <div class="stat"><div class="n">{{ upcoming_packets }}</div><div class="l">upcoming</div></div>
+    <div class="stat"><div class="n">{{ unknown_date_packets }}</div><div class="l">unknown date</div></div>
+    <div class="stat"><div class="n">{{ reviewed_packets }}</div><div class="l">reviewed</div></div>
+  </div>
+  <p style="margin-top:12px"><a href="{{ url_for('packets') }}" class="btn secondary">Browse packets →</a></p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Municipalities by state</h2>
+  <table>
+    <tr><th>State</th><th>Total</th><th>OK</th><th>No packets</th><th>No agenda</th><th>Error</th><th>Unchecked</th></tr>
+    {% for row in state_table %}
+    <tr>
+      <td><a href="{{ url_for('municipalities', state=row.state) }}">{{ row.state }}</a></td>
+      <td>{{ row.total }}</td>
+      <td>{{ row.ok }}</td>
+      <td>{{ row.no_packets_found }}</td>
+      <td>{{ row.no_agenda_found }}</td>
+      <td>{{ row.error }}</td>
+      <td>{{ row.unchecked }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% endblock %}
