@@ -2,164 +2,151 @@
 {% block title %}New Invoice — Muni Packet Crawler{% endblock %}
 {% block content %}
 
-<div class="card" style="max-width:720px">
-  <h2 style="margin-top:0">New invoice</h2>
+<style>main { max-width: 98vw; }</style>
 
-  <details style="margin-bottom:16px">
-    <summary class="muted" style="cursor:pointer">Paste JSON to auto-fill this form</summary>
-    <p class="muted" style="font-size:13px">
-      Paste an object with any of these keys — anything you omit is left as-is.
-      <code>items</code> replaces the line items table below.
+<h2 style="margin-top:0">New invoice</h2>
+
+<div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap">
+  <div class="card" style="flex:1; min-width:380px">
+    <p class="muted" style="font-size:13px; margin-top:0">
+      Every field the invoice uses is in this one JSON object — edit it directly.
+      FROM fields are pre-filled from your <a href="{{ url_for('business_profile') }}">business profile</a>.
+      <code>items</code> is a list of <code>{"description": "...", "amount": 0}</code> objects — the invoice's
+      total is always the sum of these, never a number set separately.
     </p>
-    <pre style="background:var(--bg); padding:10px; border-radius:6px; font-size:12px; overflow:auto">{
-  "from_name": "Acme Consulting LLC",
-  "from_address": "123 Main St, Springfield, IL",
-  "from_phone": "217-555-0142",
-  "from_email": "billing@acme.example",
-  "to_name": "Jane Doe",
-  "to_address": "456 Oak Ave, Springfield, IL",
-  "to_phone": "217-555-9999",
-  "to_email": "jane@example.com",
-  "invoice_date": "2026-08-07",
-  "due_date": "2026-09-01",
-  "payment_method": "Wire Transfer",
-  "notes": "Thank you for your business.",
-  "account_details": "Bank: First National · Account: 000123456 · Routing: 021000021",
-  "theme_color": "#2955a3",
-  "items": [
-    {"description": "Referral fee", "amount": 3000},
-    {"description": "Admin fee", "amount": 150}
-  ]
-}</pre>
-    <textarea id="json-input" rows="6" style="width:100%" placeholder="Paste JSON here…"></textarea>
-    <p><button type="button" class="secondary" onclick="applyJson()">Apply JSON</button></p>
-  </details>
 
-  <form method="post" id="invoice-form">
-    <div style="display:flex; gap:24px; flex-wrap:wrap">
-      <div style="flex:1; min-width:280px">
-        <h3>From</h3>
-        <p class="muted" style="font-size:12px; margin-top:-8px">Defaults from your <a href="{{ url_for('business_profile') }}">business profile</a>.</p>
-        <p><label>Name<br><input type="text" name="from_name" style="width:100%" value="{{ profile.name or '' }}"></label></p>
-        <p><label>Address<br><input type="text" name="from_address" style="width:100%" value="{{ profile.address or '' }}"></label></p>
-        <p><label>Phone<br><input type="text" name="from_phone" style="width:100%" value="{{ profile.phone or '' }}"></label></p>
-        <p><label>Email<br><input type="email" name="from_email" style="width:100%" value="{{ profile.email or '' }}"></label></p>
-        <p><label>Account details for payment<br>
-          <textarea name="account_details" id="account-details-input" style="width:100%" rows="3">{{ profile.account_details or '' }}</textarea>
-        </label></p>
-        <p class="muted" style="font-size:12px; margin-top:-8px">Only shown on the PDF if filled in.</p>
-        <p><label>Theme color<br>
-          <input type="color" name="theme_color" id="theme-color-input" value="{{ profile.theme_color or '#2955a3' }}">
-        </label></p>
+    <form method="post" id="invoice-form" enctype="multipart/form-data">
+      <textarea name="invoice_json" id="json-input" rows="20"
+        style="width:100%; font-family:ui-monospace,Consolas,monospace; font-size:13px; line-height:1.5"
+        oninput="onJsonChanged()">{{ default_json }}</textarea>
+      <p id="json-status" style="font-size:13px; min-height:18px"></p>
+
+      <div class="filters">
+        <label style="font-size:13px">Theme color<br>
+          <input type="color" id="theme-color-picker" onchange="onColorPickerChanged()">
+        </label>
+        <select id="commission-type-select">
+          <option value="">— Insert items from a commission type —</option>
+          {% for ct in commission_types %}<option value="{{ ct.id }}">{{ ct.name }}</option>{% endfor %}
+        </select>
+        <input type="number" step="0.01" id="base-amount-input" placeholder="base amount" style="width:140px">
+        <button type="button" class="secondary" onclick="insertFromCommissionType()">Insert</button>
       </div>
-      <div style="flex:1; min-width:280px">
-        <h3>To</h3>
-        <p><label>Client name<br><input type="text" name="to_name" style="width:100%"></label></p>
-        <p><label>Address<br><input type="text" name="to_address" style="width:100%"></label></p>
-        <p><label>Phone<br><input type="text" name="to_phone" style="width:100%"></label></p>
-        <p><label>Email<br><input type="email" name="to_email" style="width:100%"></label></p>
-      </div>
+
+      <p>
+        <label>Logo for this invoice (optional)<br><input type="file" name="logo" id="logo-input" accept="image/*" onchange="onJsonChanged()"></label>
+      </p>
+      <p class="muted" style="font-size:12px; margin-top:-8px">
+        Falls back to your business profile's logo if left blank. Shown centered above "INVOICE" and as a
+        faint watermark, fitted to a fixed size automatically.
+      </p>
+
+      <button type="submit" id="submit-btn">Create invoice</button>
+      <a href="{{ url_for('invoices') }}" class="btn secondary">Cancel</a>
+    </form>
+  </div>
+
+  <div class="card" style="flex:1; min-width:380px; padding:0; overflow:hidden">
+    <div style="padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center">
+      <strong style="font-size:13px">Live preview</strong>
+      <span id="preview-status" class="muted" style="font-size:12px"></span>
     </div>
-
-    <h3>Details</h3>
-    <div class="filters">
-      <label class="muted" style="font-size:13px">Invoice date<br><input type="date" name="invoice_date" value="{{ today }}"></label>
-      <label class="muted" style="font-size:13px">Due date<br><input type="date" name="due_date"></label>
-      <label class="muted" style="font-size:13px">Payment method<br><input type="text" name="payment_method" placeholder="e.g. Check, ACH, Wire"></label>
-    </div>
-
-    <h3>Line items</h3>
-    <div class="filters">
-      <select id="commission-type-select" name="commission_type_id">
-        <option value="">— No commission type —</option>
-        {% for ct in commission_types %}<option value="{{ ct.id }}">{{ ct.name }}</option>{% endfor %}
-      </select>
-      <label class="muted" style="font-size:13px">Base amount<br><input type="number" step="0.01" id="base-amount-input" style="width:140px"></label>
-      <button type="button" class="secondary" onclick="generateFromCommissionType()">Generate items</button>
-    </div>
-    <p class="muted" style="font-size:12px">Generating replaces the table below with that type's computed line items — you can still edit, add, or remove rows afterward.</p>
-
-    <table id="items-table">
-      <tr><th>Description</th><th>Amount</th><th></th></tr>
-    </table>
-    <p><button type="button" class="secondary" onclick="addItemRow()">+ Add line item</button></p>
-    <p style="font-size:16px"><strong>Total: $<span id="total-display">0.00</span></strong></p>
-
-    <p><label>Notes<br><textarea name="notes" id="notes-input" style="width:100%" rows="3"></textarea></label></p>
-
-    <button type="submit">Create invoice</button>
-    <a href="{{ url_for('invoices') }}" class="btn secondary">Cancel</a>
-  </form>
+    <iframe id="preview-frame" style="width:100%; height:88vh; border:none; background:white"></iframe>
+  </div>
 </div>
 
 <script>
-function addItemRow(description, amount) {
-  var table = document.getElementById('items-table');
-  var row = table.insertRow(-1);
-  row.innerHTML =
-    '<td><input type="text" name="item_description" style="width:100%"></td>' +
-    '<td><input type="number" step="0.01" class="item-amount" name="item_amount" style="width:110px" oninput="recalcTotal()"></td>' +
-    '<td><button type="button" class="secondary" onclick="this.closest(\'tr\').remove(); recalcTotal()">remove</button></td>';
-  if (description !== undefined) row.cells[0].querySelector('input').value = description;
-  if (amount !== undefined) row.cells[1].querySelector('input').value = amount;
+var previewUrl = null;
+var previewTimer = null;
+
+var HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+function onJsonChanged() {
+  var status = document.getElementById('json-status');
+  var submitBtn = document.getElementById('submit-btn');
+  var valid = false;
+  try {
+    var data = JSON.parse(document.getElementById('json-input').value);
+    var items = Array.isArray(data.items) ? data.items : [];
+    var total = items.reduce(function (sum, item) { return sum + (parseFloat(item.amount) || 0); }, 0);
+    status.textContent = 'Valid — ' + items.length + ' item(s), total $' + total.toFixed(2);
+    status.style.color = '';
+    submitBtn.disabled = false;
+    valid = true;
+    if (typeof data.theme_color === 'string' && HEX_COLOR_RE.test(data.theme_color)) {
+      document.getElementById('theme-color-picker').value = data.theme_color;
+    }
+  } catch (e) {
+    status.textContent = 'Invalid JSON: ' + e.message;
+    status.style.color = 'var(--err)';
+    submitBtn.disabled = true;
+  }
+  clearTimeout(previewTimer);
+  if (valid) {
+    previewTimer = setTimeout(refreshPreview, 400);
+  }
 }
 
-function clearItemRows() {
-  var table = document.getElementById('items-table');
-  while (table.rows.length > 1) table.deleteRow(1);
+function onColorPickerChanged() {
+  var textarea = document.getElementById('json-input');
+  try {
+    var data = JSON.parse(textarea.value);
+    data.theme_color = document.getElementById('theme-color-picker').value;
+    textarea.value = JSON.stringify(data, null, 2);
+    onJsonChanged();
+  } catch (e) {
+    alert('Fix the JSON syntax error before using the color picker.');
+  }
 }
 
-function recalcTotal() {
-  var total = 0;
-  document.querySelectorAll('.item-amount').forEach(function (el) {
-    total += parseFloat(el.value) || 0;
-  });
-  document.getElementById('total-display').textContent = total.toFixed(2);
-}
+function refreshPreview() {
+  var previewStatus = document.getElementById('preview-status');
+  var formData = new FormData();
+  formData.append('invoice_json', document.getElementById('json-input').value);
+  var logoFile = document.getElementById('logo-input').files[0];
+  if (logoFile) formData.append('logo', logoFile);
 
-function generateFromCommissionType() {
-  var typeId = document.getElementById('commission-type-select').value;
-  var baseAmount = document.getElementById('base-amount-input').value || 0;
-  if (!typeId) { alert('Pick a commission type first.'); return; }
-  fetch('/commission-types/' + typeId + '/compute?base_amount=' + encodeURIComponent(baseAmount))
-    .then(function (r) { return r.json(); })
-    .then(function (data) {
-      clearItemRows();
-      data.items.forEach(function (item) { addItemRow(item.description, item.amount); });
-      recalcTotal();
+  previewStatus.textContent = 'updating…';
+  fetch('{{ url_for("preview_new_invoice") }}', { method: 'POST', body: formData })
+    .then(function (r) {
+      if (!r.ok) throw new Error('preview failed');
+      return r.blob();
+    })
+    .then(function (blob) {
+      var oldUrl = previewUrl;
+      previewUrl = URL.createObjectURL(blob);
+      document.getElementById('preview-frame').src = previewUrl;
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      previewStatus.textContent = '';
+    })
+    .catch(function () {
+      previewStatus.textContent = 'preview failed';
     });
 }
 
-function applyJson() {
-  var raw = document.getElementById('json-input').value.trim();
-  if (!raw) return;
-  var data;
+function insertFromCommissionType() {
+  var typeId = document.getElementById('commission-type-select').value;
+  var baseAmount = document.getElementById('base-amount-input').value || 0;
+  if (!typeId) { alert('Pick a commission type first.'); return; }
+  var textarea = document.getElementById('json-input');
+  var current;
   try {
-    data = JSON.parse(raw);
+    current = JSON.parse(textarea.value);
   } catch (e) {
-    alert('That isn\'t valid JSON: ' + e.message);
+    alert('Fix the JSON syntax error before inserting items.');
     return;
   }
-  var fieldMap = {
-    from_name: 'from_name', from_address: 'from_address', from_phone: 'from_phone', from_email: 'from_email',
-    to_name: 'to_name', to_address: 'to_address', to_phone: 'to_phone', to_email: 'to_email',
-    invoice_date: 'invoice_date', due_date: 'due_date', payment_method: 'payment_method',
-    theme_color: 'theme_color',
-  };
-  Object.keys(fieldMap).forEach(function (key) {
-    if (data[key] !== undefined) {
-      var el = document.querySelector('[name="' + fieldMap[key] + '"]');
-      if (el) el.value = data[key];
-    }
-  });
-  if (data.notes !== undefined) document.getElementById('notes-input').value = data.notes;
-  if (data.account_details !== undefined) document.getElementById('account-details-input').value = data.account_details;
-  if (Array.isArray(data.items)) {
-    clearItemRows();
-    data.items.forEach(function (item) { addItemRow(item.description, item.amount); });
-    recalcTotal();
-  }
+  fetch('/commission-types/' + typeId + '/compute?base_amount=' + encodeURIComponent(baseAmount))
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      current.items = data.items;
+      textarea.value = JSON.stringify(current, null, 2);
+      onJsonChanged();
+    });
 }
+
+onJsonChanged();
+refreshPreview();
 </script>
 
 {% endblock %}

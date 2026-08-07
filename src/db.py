@@ -156,6 +156,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     notes TEXT,
     account_details TEXT,
     theme_color TEXT,
+    logo_image BLOB,
+    logo_watermark BLOB,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -193,6 +195,8 @@ MIGRATIONS = [
     ("invoices", "account_details", "ALTER TABLE invoices ADD COLUMN account_details TEXT"),
     ("business_profile", "theme_color", "ALTER TABLE business_profile ADD COLUMN theme_color TEXT"),
     ("invoices", "theme_color", "ALTER TABLE invoices ADD COLUMN theme_color TEXT"),
+    ("invoices", "logo_image", "ALTER TABLE invoices ADD COLUMN logo_image BLOB"),
+    ("invoices", "logo_watermark", "ALTER TABLE invoices ADD COLUMN logo_watermark BLOB"),
 ]
 
 

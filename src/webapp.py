@@ -11,7 +11,9 @@ the setup page (QR code); every visit after that requires a 6-digit code.
 Run with: python src/webapp.py, then open http://localhost:5000
 """
 
+import json
 import os
+import sqlite3
 import subprocess
 import sys
 from datetime import date
@@ -741,6 +743,52 @@ def compute_commission_type(type_id: int):
     return {"items": items}
 
 
+@app.route("/invoices/preview", methods=["POST"])
+def preview_new_invoice():
+    """Backs the live preview pane on the new-invoice page: renders the
+    current (possibly invalid) form state as a real PDF without touching
+    the database at all — same generate_pdf() the real save uses, so the
+    preview can never drift from the actual output."""
+    conn = get_connection()
+    profile = invoicing.get_business_profile(conn)
+    conn.close()
+    try:
+        parsed = invoicing.parse_invoice_json(request.form.get("invoice_json", ""))
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    f = parsed["fields"]
+
+    logo_image = logo_watermark = None
+    logo_file = request.files.get("logo")
+    if logo_file and logo_file.filename:
+        try:
+            logo_image, logo_watermark = invoicing.process_logo_image(logo_file.stream)
+        except Exception:
+            pass
+
+    fake_invoice = {
+        "invoice_number": f["invoice_number"] or "PREVIEW",
+        "invoice_date": f["invoice_date"] or date.today().isoformat(),
+        "due_date": f["due_date"],
+        "payment_method": f["payment_method"],
+        "from_name": f["from_name"] or profile.get("name"),
+        "from_address": f["from_address"] or profile.get("address"),
+        "from_phone": f["from_phone"] or profile.get("phone"),
+        "from_email": f["from_email"] or profile.get("email"),
+        "to_name": f["to_name"],
+        "to_address": f["to_address"],
+        "to_phone": f["to_phone"],
+        "to_email": f["to_email"],
+        "notes": f["notes"],
+        "account_details": f["account_details"] or profile.get("account_details"),
+        "theme_color": f["theme_color"] or profile.get("theme_color"),
+        "logo_image": logo_image,
+        "logo_watermark": logo_watermark,
+    }
+    pdf_bytes = invoicing.generate_pdf(fake_invoice, parsed["items"])
+    return Response(pdf_bytes, mimetype="application/pdf")
+
+
 @app.route("/invoices/new", methods=["GET", "POST"])
 def new_invoice():
     conn = get_connection()
@@ -748,56 +796,63 @@ def new_invoice():
 
     if request.method == "POST":
         profile = invoicing.get_business_profile(conn)
-        invoice_number = invoicing.next_invoice_number(conn)
-        commission_type_id = request.form.get("commission_type_id") or None
-        base_amount = float(request.form.get("base_amount") or 0)
+        try:
+            parsed = invoicing.parse_invoice_json(request.form.get("invoice_json", ""))
+        except ValueError as e:
+            conn.close()
+            flash(f"Couldn't create invoice — {e}")
+            return redirect(url_for("new_invoice"))
+        f = parsed["fields"]
+        invoice_number = f["invoice_number"] or invoicing.next_invoice_number(conn)
 
-        cur.execute(
-            """
-            INSERT INTO invoices (
-                invoice_number, invoice_date, due_date, payment_method,
-                from_name, from_address, from_phone, from_email,
-                to_name, to_address, to_phone, to_email,
-                commission_type_id, base_amount, notes, account_details, theme_color
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                invoice_number,
-                request.form.get("invoice_date") or date.today().isoformat(),
-                request.form.get("due_date") or None,
-                request.form.get("payment_method") or None,
-                request.form.get("from_name") or profile.get("name"),
-                request.form.get("from_address") or profile.get("address"),
-                request.form.get("from_phone") or profile.get("phone"),
-                request.form.get("from_email") or profile.get("email"),
-                request.form.get("to_name") or None,
-                request.form.get("to_address") or None,
-                request.form.get("to_phone") or None,
-                request.form.get("to_email") or None,
-                commission_type_id,
-                base_amount or None,
-                request.form.get("notes") or None,
-                request.form.get("account_details") or profile.get("account_details") or None,
-                request.form.get("theme_color") or profile.get("theme_color") or None,
-            ),
-        )
+        logo_image = logo_watermark = None
+        logo_file = request.files.get("logo")
+        if logo_file and logo_file.filename:
+            try:
+                logo_image, logo_watermark = invoicing.process_logo_image(logo_file.stream)
+            except Exception:
+                flash("That logo file doesn't look like a valid image — invoice created without it.")
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO invoices (
+                    invoice_number, invoice_date, due_date, payment_method,
+                    from_name, from_address, from_phone, from_email,
+                    to_name, to_address, to_phone, to_email,
+                    notes, account_details, theme_color, logo_image, logo_watermark
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    invoice_number,
+                    f["invoice_date"] or date.today().isoformat(),
+                    f["due_date"],
+                    f["payment_method"],
+                    f["from_name"] or profile.get("name"),
+                    f["from_address"] or profile.get("address"),
+                    f["from_phone"] or profile.get("phone"),
+                    f["from_email"] or profile.get("email"),
+                    f["to_name"],
+                    f["to_address"],
+                    f["to_phone"],
+                    f["to_email"],
+                    f["notes"],
+                    f["account_details"] or profile.get("account_details"),
+                    f["theme_color"] or profile.get("theme_color"),
+                    logo_image,
+                    logo_watermark,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            conn.close()
+            flash(f'Couldn\'t create invoice — invoice number "{invoice_number}" is already in use.')
+            return redirect(url_for("new_invoice"))
         invoice_id = cur.lastrowid
 
-        # Line items are submitted directly from the form's own items table
-        # (populated manually, via the JSON paste box, or via the "Generate
-        # from commission type" button — all client-side), not recomputed
-        # here. This keeps invoice creation and editing on the same footing:
-        # the total is always the sum of whatever rows were actually on the
-        # page at submit time.
-        descriptions = request.form.getlist("item_description")
-        amounts = request.form.getlist("item_amount")
-        for i, (desc, amount) in enumerate(zip(descriptions, amounts)):
-            desc = desc.strip()
-            if not desc or not amount:
-                continue
+        for i, item in enumerate(parsed["items"]):
             cur.execute(
                 "INSERT INTO invoice_items (invoice_id, description, amount, sort_order) VALUES (?, ?, ?, ?)",
-                (invoice_id, desc, float(amount), i),
+                (invoice_id, item["description"], item["amount"], i),
             )
         conn.commit()
         conn.close()
@@ -807,12 +862,13 @@ def new_invoice():
     cur.execute("SELECT id, name FROM commission_types ORDER BY name")
     commission_type_options = dict_rows(cur)
     profile = invoicing.get_business_profile(conn)
+    suggested_invoice_number = invoicing.next_invoice_number(conn)
     conn.close()
+    default_json = json.dumps(invoicing.default_invoice_json(profile, suggested_invoice_number), indent=2)
     return render_template(
         "invoice_form.html",
         commission_types=commission_type_options,
-        profile=profile,
-        today=date.today().isoformat(),
+        default_json=default_json,
     )
 
 
@@ -829,53 +885,139 @@ def invoice_detail(invoice_id: int):
     inv = inv[0]
     cur.execute("SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY sort_order, id", (invoice_id,))
     items = dict_rows(cur)
+    cur.execute("SELECT id, name FROM commission_types ORDER BY name")
+    commission_type_options = dict_rows(cur)
     conn.close()
     total = round(sum(i["amount"] for i in items), 2)
-    return render_template("invoice_detail.html", inv=inv, items=items, total=total)
+    current_json = json.dumps(invoicing.invoice_to_json_dict(inv, items), indent=2)
+    return render_template(
+        "invoice_detail.html", inv=inv, items=items, total=total,
+        current_json=current_json, commission_types=commission_type_options,
+    )
+
+
+@app.route("/invoices/<int:invoice_id>/preview", methods=["POST"])
+def preview_invoice(invoice_id: int):
+    """Same idea as preview_new_invoice, but for an existing invoice being
+    edited: falls back to that invoice's own saved logo (not the business
+    default) when no new file is chosen and "remove logo" isn't checked,
+    matching update_invoice's actual save behavior exactly."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT invoice_number, logo_image, logo_watermark FROM invoices WHERE id = ?", (invoice_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {"error": "invoice not found"}, 404
+    existing_invoice_number, existing_logo, existing_watermark = row
+
+    try:
+        parsed = invoicing.parse_invoice_json(request.form.get("invoice_json", ""))
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    f = parsed["fields"]
+
+    logo_image, logo_watermark = existing_logo, existing_watermark
+    if request.form.get("remove_logo"):
+        logo_image = logo_watermark = None
+    else:
+        logo_file = request.files.get("logo")
+        if logo_file and logo_file.filename:
+            try:
+                logo_image, logo_watermark = invoicing.process_logo_image(logo_file.stream)
+            except Exception:
+                pass
+
+    fake_invoice = {
+        "invoice_number": f["invoice_number"] or existing_invoice_number,
+        "invoice_date": f["invoice_date"],
+        "due_date": f["due_date"],
+        "payment_method": f["payment_method"],
+        "from_name": f["from_name"],
+        "from_address": f["from_address"],
+        "from_phone": f["from_phone"],
+        "from_email": f["from_email"],
+        "to_name": f["to_name"],
+        "to_address": f["to_address"],
+        "to_phone": f["to_phone"],
+        "to_email": f["to_email"],
+        "notes": f["notes"],
+        "account_details": f["account_details"],
+        "theme_color": f["theme_color"],
+        "logo_image": logo_image,
+        "logo_watermark": logo_watermark,
+    }
+    pdf_bytes = invoicing.generate_pdf(fake_invoice, parsed["items"])
+    return Response(pdf_bytes, mimetype="application/pdf")
 
 
 @app.route("/invoices/<int:invoice_id>/update", methods=["POST"])
 def update_invoice(invoice_id: int):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE invoices SET
-            invoice_date = ?, due_date = ?, payment_method = ?,
-            from_name = ?, from_address = ?, from_phone = ?, from_email = ?,
-            to_name = ?, to_address = ?, to_phone = ?, to_email = ?,
-            notes = ?, account_details = ?, theme_color = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (
-            request.form.get("invoice_date"),
-            request.form.get("due_date") or None,
-            request.form.get("payment_method") or None,
-            request.form.get("from_name") or None,
-            request.form.get("from_address") or None,
-            request.form.get("from_phone") or None,
-            request.form.get("from_email") or None,
-            request.form.get("to_name") or None,
-            request.form.get("to_address") or None,
-            request.form.get("to_phone") or None,
-            request.form.get("to_email") or None,
-            request.form.get("notes") or None,
-            request.form.get("account_details") or None,
-            request.form.get("theme_color") or None,
-            invoice_id,
-        ),
-    )
+
+    try:
+        parsed = invoicing.parse_invoice_json(request.form.get("invoice_json", ""))
+    except ValueError as e:
+        conn.close()
+        flash(f"Couldn't save — {e}")
+        return redirect(url_for("invoice_detail", invoice_id=invoice_id))
+    f = parsed["fields"]
+
+    logo_file = request.files.get("logo")
+    if request.form.get("remove_logo"):
+        # Explicit revert to the business-level default logo, distinct
+        # from "no file chosen" (which must leave the existing logo alone).
+        cur.execute("UPDATE invoices SET logo_image = NULL, logo_watermark = NULL WHERE id = ?", (invoice_id,))
+    elif logo_file and logo_file.filename:
+        try:
+            logo_image, logo_watermark = invoicing.process_logo_image(logo_file.stream)
+            cur.execute(
+                "UPDATE invoices SET logo_image = ?, logo_watermark = ? WHERE id = ?",
+                (logo_image, logo_watermark, invoice_id),
+            )
+        except Exception:
+            flash("That logo file doesn't look like a valid image — logo not changed.")
+
+    # An empty invoice_number in the JSON means "leave it alone" (unlike
+    # every other field, it can't just be blanked — the column is
+    # NOT NULL UNIQUE), so fall back to the current value rather than
+    # writing NULL/empty over it.
+    invoice_number = f["invoice_number"]
+    if not invoice_number:
+        invoice_number = cur.execute(
+            "SELECT invoice_number FROM invoices WHERE id = ?", (invoice_id,)
+        ).fetchone()[0]
+
+    try:
+        cur.execute(
+            """
+            UPDATE invoices SET
+                invoice_number = ?, invoice_date = ?, due_date = ?, payment_method = ?,
+                from_name = ?, from_address = ?, from_phone = ?, from_email = ?,
+                to_name = ?, to_address = ?, to_phone = ?, to_email = ?,
+                notes = ?, account_details = ?, theme_color = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                invoice_number,
+                f["invoice_date"], f["due_date"], f["payment_method"],
+                f["from_name"], f["from_address"], f["from_phone"], f["from_email"],
+                f["to_name"], f["to_address"], f["to_phone"], f["to_email"],
+                f["notes"], f["account_details"], f["theme_color"],
+                invoice_id,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        conn.close()
+        flash(f'Couldn\'t save — invoice number "{invoice_number}" is already in use by another invoice.')
+        return redirect(url_for("invoice_detail", invoice_id=invoice_id))
 
     cur.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
-    descriptions = request.form.getlist("item_description")
-    amounts = request.form.getlist("item_amount")
-    for i, (desc, amount) in enumerate(zip(descriptions, amounts)):
-        desc = desc.strip()
-        if not desc or not amount:
-            continue
+    for i, item in enumerate(parsed["items"]):
         cur.execute(
             "INSERT INTO invoice_items (invoice_id, description, amount, sort_order) VALUES (?, ?, ?, ?)",
-            (invoice_id, desc, float(amount), i),
+            (invoice_id, item["description"], item["amount"], i),
         )
     conn.commit()
     conn.close()
@@ -892,6 +1034,16 @@ def delete_invoice(invoice_id: int):
     conn.close()
     flash("Invoice deleted.")
     return redirect(url_for("invoices"))
+
+
+@app.route("/invoices/<int:invoice_id>/logo")
+def invoice_logo(invoice_id: int):
+    conn = get_connection()
+    row = conn.execute("SELECT logo_image FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return "", 404
+    return Response(row[0], mimetype="image/png")
 
 
 @app.route("/invoices/<int:invoice_id>/pdf")
