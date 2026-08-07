@@ -53,12 +53,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+# See webapp.py's matching comment: redirect before anything riskier than
+# the stdlib gets imported, so a crash in a later import (requests, bs4,
+# playwright via pdf_review) lands in the log file instead of vanishing
+# silently under pythonw.exe (sys.stdout/stderr start out as None there).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db import redirect_console_if_headless
+redirect_console_if_headless("crawl_engine.log")
+
 import requests
 from bs4 import BeautifulSoup
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from date_extract import extract_meeting_date, is_upcoming
-from db import get_connection, redirect_console_if_headless
+from db import get_connection
 from pdf_review import extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
 
 # License/permit-style categories only: for these, a packet is only kept
@@ -567,7 +574,6 @@ def write_result(cur, muni_id: int, result: dict) -> str:
 
 
 def main() -> None:
-    redirect_console_if_headless("crawl_engine.log")
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", help="Only crawl municipalities in this state")
     parser.add_argument("--limit", type=int, help="Max number of municipalities to crawl this run")

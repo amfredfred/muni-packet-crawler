@@ -17,14 +17,24 @@ import sys
 from datetime import date
 from pathlib import Path
 
+# Redirect stdout/stderr (if headless — see db.redirect_console_if_headless)
+# before anything riskier than the stdlib gets imported. Under pythonw.exe,
+# sys.stdout/stderr start out as None; if a later import (flask, reportlab,
+# playwright, ...) throws, Python's default unhandled-exception handler
+# tries to print the traceback to stderr and, finding it None, fails
+# silently too — the process just vanishes with no trace anywhere. Doing
+# this first means any such crash lands in data/webapp.log instead.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db import redirect_console_if_headless
+redirect_console_if_headless("webapp.log")
+
 import requests
 from flask import Flask, Response, flash, redirect, render_template, request, session, url_for
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth
 import invoices as invoicing
 from crawl_sites import BOARD_KEYWORDS
-from db import get_connection, redirect_console_if_headless
+from db import get_connection
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY_PATH = BASE_DIR / "data" / ".flask_secret_key"
@@ -952,7 +962,6 @@ def remove_business_profile_logo():
 
 
 def main() -> None:
-    redirect_console_if_headless("webapp.log")
     app.run(debug=False, port=5000)
 
 

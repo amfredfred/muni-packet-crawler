@@ -15,8 +15,16 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# See webapp.py's matching comment: redirect before anything riskier than
+# the stdlib gets imported, so a crash in a later import (pdf_review, which
+# pulls in pypdf/pytesseract/pdf2image) lands in the log file instead of
+# vanishing silently under pythonw.exe (sys.stdout/stderr start out as
+# None there).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db import get_connection, redirect_console_if_headless
+from db import redirect_console_if_headless
+redirect_console_if_headless("review_engine.log")
+
+from db import get_connection
 from pdf_review import review_pdf
 
 
@@ -28,7 +36,6 @@ def process_one(packet_id: int, url: str) -> tuple[int, dict]:
 
 
 def main() -> None:
-    redirect_console_if_headless("review_engine.log")
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", help="Only review packets for municipalities in this state")
     parser.add_argument("--board-type", help="Only review packets matching this exact board_type")
