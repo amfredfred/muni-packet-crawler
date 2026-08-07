@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Business Profile — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card" style="max-width:480px">
+  <h2 style="margin-top:0">Business profile</h2>
+  <p class="muted" style="font-size:13px; margin-top:-6px">Defaults for the "From" block on new invoices — every field is optional and can be overridden per invoice.</p>
+  <form method="post">
+    <p><label>Business name<br><input type="text" name="name" style="width:100%" value="{{ profile.name or '' }}"></label></p>
+    <p><label>Address<br><input type="text" name="address" style="width:100%" value="{{ profile.address or '' }}"></label></p>
+    <p><label>Phone<br><input type="text" name="phone" style="width:100%" value="{{ profile.phone or '' }}"></label></p>
+    <p><label>Email<br><input type="email" name="email" style="width:100%" value="{{ profile.email or '' }}"></label></p>
+    <button type="submit">Save</button>
+  </form>
+</div>
+
+{% endblock %}

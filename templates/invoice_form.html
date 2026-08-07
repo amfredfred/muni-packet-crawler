@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}New Invoice — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card" style="max-width:640px">
+  <h2 style="margin-top:0">New invoice</h2>
+  <form method="post">
+    <h3>From</h3>
+    <p class="muted" style="font-size:13px; margin-top:-8px">Defaults from your <a href="{{ url_for('business_profile') }}">business profile</a> — override here if this invoice needs different letterhead info.</p>
+    <p><label>Name<br><input type="text" name="from_name" style="width:100%" value="{{ profile.name or '' }}"></label></p>
+    <p><label>Address<br><input type="text" name="from_address" style="width:100%" value="{{ profile.address or '' }}"></label></p>
+    <p><label>Phone<br><input type="text" name="from_phone" style="width:100%" value="{{ profile.phone or '' }}"></label></p>
+    <p><label>Email<br><input type="email" name="from_email" style="width:100%" value="{{ profile.email or '' }}"></label></p>
+
+    <h3>To</h3>
+    <p><label>Client name<br><input type="text" name="to_name" style="width:100%"></label></p>
+    <p><label>Address<br><input type="text" name="to_address" style="width:100%"></label></p>
+    <p><label>Phone<br><input type="text" name="to_phone" style="width:100%"></label></p>
+    <p><label>Email<br><input type="email" name="to_email" style="width:100%"></label></p>
+
+    <h3>Details</h3>
+    <p><label>Invoice date<br><input type="date" name="invoice_date" value="{{ today }}"></label></p>
+    <p><label>Due date<br><input type="date" name="due_date"></label></p>
+    <p><label>Payment method<br><input type="text" name="payment_method" style="width:100%" placeholder="e.g. Check, ACH, Wire"></label></p>
+
+    <h3>Commission / fee</h3>
+    <p><label>Commission type<br>
+      <select name="commission_type_id" style="width:100%">
+        <option value="">— None (single line item) —</option>
+        {% for ct in commission_types %}<option value="{{ ct.id }}">{{ ct.name }}</option>{% endfor %}
+      </select>
+    </label></p>
+    <p><label>Base amount<br><input type="number" step="0.01" name="base_amount" style="width:100%" placeholder="e.g. the project/sale value this commission is computed from"></label></p>
+    <p class="muted" style="font-size:13px">
+      Choosing a commission type computes its line items from this base amount as a starting
+      point — you'll be able to review and edit every line item (and add/remove rows) on the
+      next page before the invoice is final.
+    </p>
+
+    <p><label>Notes<br><textarea name="notes" style="width:100%" rows="3"></textarea></label></p>
+
+    <button type="submit">Create invoice</button>
+    <a href="{{ url_for('invoices') }}" class="btn secondary">Cancel</a>
+  </form>
+</div>
+
+{% endblock %}

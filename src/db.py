@@ -74,6 +74,70 @@ CREATE TABLE IF NOT EXISTS blocked_sources (
     last_status TEXT DEFAULT 'unknown',
     UNIQUE(state, url)
 );
+
+-- Single-row table (same CHECK(id=1) pattern as auth_totp): your business's
+-- own letterhead info, defaulted into new invoices' FROM block but not
+-- required — every field is nullable and editable per invoice.
+CREATE TABLE IF NOT EXISTS business_profile (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    name TEXT,
+    address TEXT,
+    phone TEXT,
+    email TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- A named fee/commission structure (e.g. "Buyer's Agent Commission",
+-- "Referral Fee") made of one or more line-item rules. Selecting a
+-- commission type on a new invoice auto-populates invoice_items by
+-- evaluating each rule against the invoice's base_amount — but the
+-- result is just a starting point; invoice_items are editable afterward
+-- and the invoice's real total is always the sum of its own line items,
+-- never a number decided in advance and back-filled into items.
+CREATE TABLE IF NOT EXISTS commission_types (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS commission_type_items (
+    id INTEGER PRIMARY KEY,
+    commission_type_id INTEGER NOT NULL REFERENCES commission_types(id),
+    description TEXT NOT NULL,
+    calc_type TEXT NOT NULL CHECK (calc_type IN ('percentage', 'fixed')),
+    value REAL NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER PRIMARY KEY,
+    invoice_number TEXT NOT NULL UNIQUE,
+    invoice_date TEXT NOT NULL,
+    due_date TEXT,
+    payment_method TEXT,
+    from_name TEXT,
+    from_address TEXT,
+    from_phone TEXT,
+    from_email TEXT,
+    to_name TEXT,
+    to_address TEXT,
+    to_phone TEXT,
+    to_email TEXT,
+    commission_type_id INTEGER REFERENCES commission_types(id),
+    base_amount REAL,
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS invoice_items (
+    id INTEGER PRIMARY KEY,
+    invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+    description TEXT NOT NULL,
+    amount REAL NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Added after the initial schema — kept as migrations rather than folded into

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Invoices — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2 style="margin-top:0">Invoices</h2>
+  <p>
+    <a href="{{ url_for('new_invoice') }}" class="btn">+ New invoice</a>
+    <a href="{{ url_for('commission_types') }}" class="btn secondary">Commission types</a>
+    <a href="{{ url_for('business_profile') }}" class="btn secondary">Business profile</a>
+  </p>
+  <table>
+    <tr><th>Invoice #</th><th>Date</th><th>To</th><th>Total</th><th></th></tr>
+    {% for inv in invoices %}
+    <tr>
+      <td><a href="{{ url_for('invoice_detail', invoice_id=inv.id) }}">{{ inv.invoice_number }}</a></td>
+      <td>{{ inv.invoice_date }}</td>
+      <td>{{ inv.to_name or '—' }}</td>
+      <td>${{ '%.2f'|format(inv.total) }}</td>
+      <td><a href="{{ url_for('invoice_pdf', invoice_id=inv.id) }}" target="_blank" class="btn secondary">PDF</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No invoices yet.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% endblock %}

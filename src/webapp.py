@@ -14,13 +14,15 @@ Run with: python src/webapp.py, then open http://localhost:5000
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import requests
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, Response, flash, redirect, render_template, request, session, url_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth
+import invoices as invoicing
 from crawl_sites import BOARD_KEYWORDS
 from db import get_connection
 
@@ -593,6 +595,304 @@ def mark_reviewed(packet_id: int):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.route("/commission-types")
+def commission_types():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM commission_types ORDER BY name")
+    types = dict_rows(cur)
+    for t in types:
+        cur.execute(
+            "SELECT * FROM commission_type_items WHERE commission_type_id = ? ORDER BY sort_order, id",
+            (t["id"],),
+        )
+        t["rules"] = dict_rows(cur)
+    conn.close()
+    return render_template("commission_types.html", types=types)
+
+
+@app.route("/commission-types/new", methods=["GET", "POST"])
+def new_commission_type():
+    if request.method == "POST":
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO commission_types (name, description) VALUES (?, ?)",
+            (request.form["name"].strip(), request.form.get("description", "").strip()),
+        )
+        type_id = cur.lastrowid
+        descriptions = request.form.getlist("item_description")
+        calc_types = request.form.getlist("item_calc_type")
+        values = request.form.getlist("item_value")
+        for i, (desc, calc_type, value) in enumerate(zip(descriptions, calc_types, values)):
+            desc = desc.strip()
+            if not desc or not value:
+                continue
+            cur.execute(
+                "INSERT INTO commission_type_items (commission_type_id, description, calc_type, value, sort_order) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (type_id, desc, calc_type, float(value), i),
+            )
+        conn.commit()
+        conn.close()
+        flash(f"Created commission type \"{request.form['name']}\".")
+        return redirect(url_for("commission_types"))
+    return render_template("commission_type_form.html", ct=None)
+
+
+@app.route("/commission-types/<int:type_id>/edit", methods=["GET", "POST"])
+def edit_commission_type(type_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    if request.method == "POST":
+        cur.execute(
+            "UPDATE commission_types SET name = ?, description = ? WHERE id = ?",
+            (request.form["name"].strip(), request.form.get("description", "").strip(), type_id),
+        )
+        cur.execute("DELETE FROM commission_type_items WHERE commission_type_id = ?", (type_id,))
+        descriptions = request.form.getlist("item_description")
+        calc_types = request.form.getlist("item_calc_type")
+        values = request.form.getlist("item_value")
+        for i, (desc, calc_type, value) in enumerate(zip(descriptions, calc_types, values)):
+            desc = desc.strip()
+            if not desc or not value:
+                continue
+            cur.execute(
+                "INSERT INTO commission_type_items (commission_type_id, description, calc_type, value, sort_order) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (type_id, desc, calc_type, float(value), i),
+            )
+        conn.commit()
+        conn.close()
+        flash(f"Updated \"{request.form['name']}\".")
+        return redirect(url_for("commission_types"))
+
+    cur.execute("SELECT * FROM commission_types WHERE id = ?", (type_id,))
+    ct = dict_rows(cur)
+    if not ct:
+        conn.close()
+        flash("Commission type not found.")
+        return redirect(url_for("commission_types"))
+    ct = ct[0]
+    cur.execute(
+        "SELECT * FROM commission_type_items WHERE commission_type_id = ? ORDER BY sort_order, id",
+        (type_id,),
+    )
+    ct["rules"] = dict_rows(cur)
+    conn.close()
+    return render_template("commission_type_form.html", ct=ct)
+
+
+@app.route("/commission-types/<int:type_id>/delete", methods=["POST"])
+def delete_commission_type(type_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM commission_type_items WHERE commission_type_id = ?", (type_id,))
+    conn.execute("DELETE FROM commission_types WHERE id = ?", (type_id,))
+    conn.commit()
+    conn.close()
+    flash("Commission type deleted.")
+    return redirect(url_for("commission_types"))
+
+
+@app.route("/invoices")
+def invoices():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT i.*, (SELECT COALESCE(SUM(amount), 0) FROM invoice_items WHERE invoice_id = i.id) AS total
+        FROM invoices i ORDER BY i.created_at DESC
+        """
+    )
+    rows = dict_rows(cur)
+    conn.close()
+    return render_template("invoices.html", invoices=rows)
+
+
+@app.route("/invoices/new", methods=["GET", "POST"])
+def new_invoice():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if request.method == "POST":
+        profile = invoicing.get_business_profile(conn)
+        invoice_number = invoicing.next_invoice_number(conn)
+        commission_type_id = request.form.get("commission_type_id") or None
+        base_amount = float(request.form.get("base_amount") or 0)
+
+        cur.execute(
+            """
+            INSERT INTO invoices (
+                invoice_number, invoice_date, due_date, payment_method,
+                from_name, from_address, from_phone, from_email,
+                to_name, to_address, to_phone, to_email,
+                commission_type_id, base_amount, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                invoice_number,
+                request.form.get("invoice_date") or date.today().isoformat(),
+                request.form.get("due_date") or None,
+                request.form.get("payment_method") or None,
+                request.form.get("from_name") or profile.get("name"),
+                request.form.get("from_address") or profile.get("address"),
+                request.form.get("from_phone") or profile.get("phone"),
+                request.form.get("from_email") or profile.get("email"),
+                request.form.get("to_name") or None,
+                request.form.get("to_address") or None,
+                request.form.get("to_phone") or None,
+                request.form.get("to_email") or None,
+                commission_type_id,
+                base_amount,
+                request.form.get("notes") or None,
+            ),
+        )
+        invoice_id = cur.lastrowid
+
+        if commission_type_id:
+            items = invoicing.compute_items_from_commission_type(conn, int(commission_type_id), base_amount)
+        else:
+            items = [{"description": "Services rendered", "amount": base_amount}] if base_amount else []
+        for i, item in enumerate(items):
+            cur.execute(
+                "INSERT INTO invoice_items (invoice_id, description, amount, sort_order) VALUES (?, ?, ?, ?)",
+                (invoice_id, item["description"], item["amount"], i),
+            )
+        conn.commit()
+        conn.close()
+        flash(f"Created {invoice_number}. Review and adjust line items before sending.")
+        return redirect(url_for("invoice_detail", invoice_id=invoice_id))
+
+    cur.execute("SELECT id, name FROM commission_types ORDER BY name")
+    commission_type_options = dict_rows(cur)
+    profile = invoicing.get_business_profile(conn)
+    conn.close()
+    return render_template(
+        "invoice_form.html",
+        commission_types=commission_type_options,
+        profile=profile,
+        today=date.today().isoformat(),
+    )
+
+
+@app.route("/invoices/<int:invoice_id>")
+def invoice_detail(invoice_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,))
+    inv = dict_rows(cur)
+    if not inv:
+        conn.close()
+        flash("Invoice not found.")
+        return redirect(url_for("invoices"))
+    inv = inv[0]
+    cur.execute("SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY sort_order, id", (invoice_id,))
+    items = dict_rows(cur)
+    conn.close()
+    total = round(sum(i["amount"] for i in items), 2)
+    return render_template("invoice_detail.html", inv=inv, items=items, total=total)
+
+
+@app.route("/invoices/<int:invoice_id>/update", methods=["POST"])
+def update_invoice(invoice_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE invoices SET
+            invoice_date = ?, due_date = ?, payment_method = ?,
+            from_name = ?, from_address = ?, from_phone = ?, from_email = ?,
+            to_name = ?, to_address = ?, to_phone = ?, to_email = ?,
+            notes = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            request.form.get("invoice_date"),
+            request.form.get("due_date") or None,
+            request.form.get("payment_method") or None,
+            request.form.get("from_name") or None,
+            request.form.get("from_address") or None,
+            request.form.get("from_phone") or None,
+            request.form.get("from_email") or None,
+            request.form.get("to_name") or None,
+            request.form.get("to_address") or None,
+            request.form.get("to_phone") or None,
+            request.form.get("to_email") or None,
+            request.form.get("notes") or None,
+            invoice_id,
+        ),
+    )
+
+    cur.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
+    descriptions = request.form.getlist("item_description")
+    amounts = request.form.getlist("item_amount")
+    for i, (desc, amount) in enumerate(zip(descriptions, amounts)):
+        desc = desc.strip()
+        if not desc or not amount:
+            continue
+        cur.execute(
+            "INSERT INTO invoice_items (invoice_id, description, amount, sort_order) VALUES (?, ?, ?, ?)",
+            (invoice_id, desc, float(amount), i),
+        )
+    conn.commit()
+    conn.close()
+    flash("Invoice updated.")
+    return redirect(url_for("invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/invoices/<int:invoice_id>/delete", methods=["POST"])
+def delete_invoice(invoice_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
+    conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+    conn.commit()
+    conn.close()
+    flash("Invoice deleted.")
+    return redirect(url_for("invoices"))
+
+
+@app.route("/invoices/<int:invoice_id>/pdf")
+def invoice_pdf(invoice_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,))
+    inv = dict_rows(cur)
+    if not inv:
+        conn.close()
+        flash("Invoice not found.")
+        return redirect(url_for("invoices"))
+    inv = inv[0]
+    cur.execute("SELECT description, amount FROM invoice_items WHERE invoice_id = ? ORDER BY sort_order, id", (invoice_id,))
+    items = dict_rows(cur)
+    conn.close()
+
+    pdf_bytes = invoicing.generate_pdf(inv, items)
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"inline; filename={inv['invoice_number']}.pdf"},
+    )
+
+
+@app.route("/business-profile", methods=["GET", "POST"])
+def business_profile():
+    conn = get_connection()
+    if request.method == "POST":
+        invoicing.save_business_profile(
+            conn,
+            request.form.get("name", "").strip(),
+            request.form.get("address", "").strip(),
+            request.form.get("phone", "").strip(),
+            request.form.get("email", "").strip(),
+        )
+        conn.close()
+        flash("Business profile saved.")
+        return redirect(url_for("business_profile"))
+    profile = invoicing.get_business_profile(conn)
+    conn.close()
+    return render_template("business_profile.html", profile=profile)
 
 
 def main() -> None:

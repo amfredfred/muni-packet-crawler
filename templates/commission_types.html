@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Commission Types — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2 style="margin-top:0">Commission types</h2>
+  <p class="muted" style="font-size:13px; margin-top:-6px">
+    Reusable fee templates. Each item is a rule — a percentage of the invoice's
+    base amount, or a fixed fee — evaluated when you create a new invoice with
+    this type selected. The generated line items are a starting point only;
+    every invoice's real total is the sum of its own (editable) line items.
+  </p>
+  <p><a href="{{ url_for('new_commission_type') }}" class="btn">+ New commission type</a></p>
+
+  {% for ct in types %}
+  <div class="card" style="background:var(--bg)">
+    <h3 style="margin-top:0">{{ ct.name }}</h3>
+    {% if ct.description %}<p class="muted" style="font-size:13px">{{ ct.description }}</p>{% endif %}
+    <table>
+      <tr><th>Description</th><th>Type</th><th>Value</th></tr>
+      {% for item in ct.rules %}
+      <tr>
+        <td>{{ item.description }}</td>
+        <td class="muted">{{ item.calc_type }}</td>
+        <td>{{ item.value }}{{ '%' if item.calc_type == 'percentage' else '' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p style="margin-top:10px">
+      <a href="{{ url_for('edit_commission_type', type_id=ct.id) }}" class="btn secondary">Edit</a>
+      <form method="post" action="{{ url_for('delete_commission_type', type_id=ct.id) }}" class="inline"
+            onsubmit="return confirm('Delete {{ ct.name }}? Existing invoices keep their own copies of the line items.')">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </p>
+  </div>
+  {% else %}
+  <p class="muted">No commission types yet.</p>
+  {% endfor %}
+</div>
+
+{% endblock %}

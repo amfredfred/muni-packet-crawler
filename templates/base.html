@@ -51,6 +51,7 @@
     <a href="{{ url_for('municipalities') }}" class="{{ 'active' if request.endpoint == 'municipalities' }}">Municipalities</a>
     <a href="{{ url_for('packets') }}" class="{{ 'active' if request.endpoint == 'packets' }}">Packets</a>
     <a href="{{ url_for('new_municipality') }}" class="{{ 'active' if request.endpoint == 'new_municipality' }}">Add Municipality</a>
+    <a href="{{ url_for('invoices') }}" class="{{ 'active' if request.endpoint and request.endpoint.startswith('invoice') }}">Invoices</a>
   </nav>
   <form method="post" action="{{ url_for('logout') }}" style="margin-left:auto">
     <button type="submit" class="secondary">Log out</button>
