@@ -50,6 +50,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -530,8 +531,11 @@ def save_meeting_and_packets(
 
     packet_count = 0
     for p in direct:
-        if p["is_upcoming"] == 0:  # confirmed past — skip; unknown (None) still saved
-            continue
+        if p["is_upcoming"] != 1:  # only a confirmed *upcoming* date is worth keeping —
+            continue                # past (0) and undeterminable (None) are both skipped;
+                                     # an undated packet is indistinguishable from an old/
+                                     # archived one and gets re-evaluated on the next crawl
+                                     # of this same page anyway if it's ever re-found.
         found_via = "pdf_link" if p.get("found_via_pdf_link") else "direct"
         cur.execute(
             """
@@ -546,7 +550,7 @@ def save_meeting_and_packets(
 
     for subpage, sub_direct in subpage_results:
         for p in sub_direct:
-            if p["is_upcoming"] == 0:
+            if p["is_upcoming"] != 1:
                 continue
             found_via = "pdf_link" if p.get("found_via_pdf_link") else "subpage"
             cur.execute(
@@ -561,6 +565,35 @@ def save_meeting_and_packets(
             packet_count += 1
 
     return packet_count
+
+
+def prune_stale_packets(conn) -> dict:
+    """Deletes packets no longer worth keeping. Two categories, both a
+    deliberate policy call (not a bug fix): an undated packet is
+    indistinguishable from an old/archived one, so it's treated the same
+    way — save_meeting_and_packets already refuses to save new ones like
+    this, but this retroactively clears out any that were saved before
+    that rule existed. A dated packet naturally goes from upcoming to
+    past as time moves forward; nothing else re-checks that after the
+    initial save, so is_upcoming is recomputed against *today* for every
+    dated packet first (a row's stored value is only as fresh as its last
+    crawl), then anything now-past is deleted too."""
+    cur = conn.cursor()
+    today = date.today()
+    rows = cur.execute("SELECT id, meeting_date FROM packets WHERE meeting_date IS NOT NULL").fetchall()
+    for packet_id, meeting_date_str in rows:
+        try:
+            meeting_date = date.fromisoformat(meeting_date_str)
+        except (ValueError, TypeError):
+            continue
+        cur.execute("UPDATE packets SET is_upcoming = ? WHERE id = ?", (is_upcoming(meeting_date, today), packet_id))
+
+    cur.execute("DELETE FROM packets WHERE meeting_date IS NULL")
+    undated_deleted = cur.rowcount
+    cur.execute("DELETE FROM packets WHERE is_upcoming = 0")
+    past_deleted = cur.rowcount
+    conn.commit()
+    return {"undated_deleted": undated_deleted, "past_deleted": past_deleted}
 
 
 def crawl_municipality(official_url: str) -> dict:
@@ -711,9 +744,14 @@ def main() -> None:
             status_counts[status] = status_counts.get(status, 0) + 1
             print(f"  [{done}/{len(rows)}] {name}, {state}: {status}")
 
+    prune_result = prune_stale_packets(conn)
     conn.close()
 
     print("done —", status_counts)
+    print(
+        f"pruned {prune_result['undated_deleted']} undated packet(s) and "
+        f"{prune_result['past_deleted']} now-past packet(s)"
+    )
 
 
 if __name__ == "__main__":
