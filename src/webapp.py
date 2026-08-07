@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth
 import invoices as invoicing
 from crawl_sites import BOARD_KEYWORDS
-from db import get_connection
+from db import get_connection, redirect_console_if_headless
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY_PATH = BASE_DIR / "data" / ".flask_secret_key"
@@ -69,6 +69,13 @@ def _load_or_create_secret_key() -> bytes:
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 app.secret_key = _load_or_create_secret_key()
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # logo uploads only; everything else here is small forms
+
+
+@app.errorhandler(413)
+def _upload_too_large(e):
+    flash("That file is too large (max 8MB).")
+    return redirect(url_for("business_profile"))
 
 _engine_proc: subprocess.Popen | None = None
 _engine_desc: str = ""
@@ -711,6 +718,19 @@ def invoices():
     return render_template("invoices.html", invoices=rows)
 
 
+@app.route("/commission-types/<int:type_id>/compute")
+def compute_commission_type(type_id: int):
+    """JSON endpoint backing the invoice form's "Generate from commission
+    type" button — returns the rule-computed items for a base amount so the
+    page can drop them straight into its items table via JS, without a
+    round-trip through invoice creation itself."""
+    base_amount = float(request.args.get("base_amount") or 0)
+    conn = get_connection()
+    items = invoicing.compute_items_from_commission_type(conn, type_id, base_amount)
+    conn.close()
+    return {"items": items}
+
+
 @app.route("/invoices/new", methods=["GET", "POST"])
 def new_invoice():
     conn = get_connection()
@@ -728,8 +748,8 @@ def new_invoice():
                 invoice_number, invoice_date, due_date, payment_method,
                 from_name, from_address, from_phone, from_email,
                 to_name, to_address, to_phone, to_email,
-                commission_type_id, base_amount, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                commission_type_id, base_amount, notes, account_details, theme_color
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 invoice_number,
@@ -745,24 +765,33 @@ def new_invoice():
                 request.form.get("to_phone") or None,
                 request.form.get("to_email") or None,
                 commission_type_id,
-                base_amount,
+                base_amount or None,
                 request.form.get("notes") or None,
+                request.form.get("account_details") or profile.get("account_details") or None,
+                request.form.get("theme_color") or profile.get("theme_color") or None,
             ),
         )
         invoice_id = cur.lastrowid
 
-        if commission_type_id:
-            items = invoicing.compute_items_from_commission_type(conn, int(commission_type_id), base_amount)
-        else:
-            items = [{"description": "Services rendered", "amount": base_amount}] if base_amount else []
-        for i, item in enumerate(items):
+        # Line items are submitted directly from the form's own items table
+        # (populated manually, via the JSON paste box, or via the "Generate
+        # from commission type" button — all client-side), not recomputed
+        # here. This keeps invoice creation and editing on the same footing:
+        # the total is always the sum of whatever rows were actually on the
+        # page at submit time.
+        descriptions = request.form.getlist("item_description")
+        amounts = request.form.getlist("item_amount")
+        for i, (desc, amount) in enumerate(zip(descriptions, amounts)):
+            desc = desc.strip()
+            if not desc or not amount:
+                continue
             cur.execute(
                 "INSERT INTO invoice_items (invoice_id, description, amount, sort_order) VALUES (?, ?, ?, ?)",
-                (invoice_id, item["description"], item["amount"], i),
+                (invoice_id, desc, float(amount), i),
             )
         conn.commit()
         conn.close()
-        flash(f"Created {invoice_number}. Review and adjust line items before sending.")
+        flash(f"Created {invoice_number}.")
         return redirect(url_for("invoice_detail", invoice_id=invoice_id))
 
     cur.execute("SELECT id, name FROM commission_types ORDER BY name")
@@ -805,7 +834,7 @@ def update_invoice(invoice_id: int):
             invoice_date = ?, due_date = ?, payment_method = ?,
             from_name = ?, from_address = ?, from_phone = ?, from_email = ?,
             to_name = ?, to_address = ?, to_phone = ?, to_email = ?,
-            notes = ?, updated_at = CURRENT_TIMESTAMP
+            notes = ?, account_details = ?, theme_color = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (
@@ -821,6 +850,8 @@ def update_invoice(invoice_id: int):
             request.form.get("to_phone") or None,
             request.form.get("to_email") or None,
             request.form.get("notes") or None,
+            request.form.get("account_details") or None,
+            request.form.get("theme_color") or None,
             invoice_id,
         ),
     )
@@ -886,16 +917,42 @@ def business_profile():
             request.form.get("address", "").strip(),
             request.form.get("phone", "").strip(),
             request.form.get("email", "").strip(),
+            request.form.get("account_details", "").strip(),
+            request.form.get("theme_color", "").strip(),
         )
         conn.close()
-        flash("Business profile saved.")
+
+        logo_file = request.files.get("logo")
+        if logo_file and logo_file.filename:
+            try:
+                invoicing.save_logo(logo_file.stream)
+                flash("Business profile and logo saved.")
+            except Exception:
+                flash("Business profile saved, but that file doesn't look like a valid image — logo not updated.")
+        else:
+            flash("Business profile saved.")
         return redirect(url_for("business_profile"))
     profile = invoicing.get_business_profile(conn)
     conn.close()
-    return render_template("business_profile.html", profile=profile)
+    return render_template("business_profile.html", profile=profile, has_logo=invoicing.has_logo())
+
+
+@app.route("/business-profile/logo")
+def business_profile_logo():
+    if not invoicing.has_logo():
+        return "", 404
+    return Response(invoicing.LOGO_PATH.read_bytes(), mimetype="image/png")
+
+
+@app.route("/business-profile/logo/remove", methods=["POST"])
+def remove_business_profile_logo():
+    invoicing.remove_logo()
+    flash("Logo removed.")
+    return redirect(url_for("business_profile"))
 
 
 def main() -> None:
+    redirect_console_if_headless("webapp.log")
     app.run(debug=False, port=5000)
 
 

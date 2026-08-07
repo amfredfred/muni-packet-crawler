@@ -27,6 +27,7 @@ muni-crawl = "crawl_sites:main"
 muni-review-packets = "review_packets:main"
 muni-list-upcoming = "list_upcoming:main"
 muni-webapp = "webapp:main"
+muni-export-seed = "export_seed_db:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -41,6 +42,7 @@ py-modules = [
     "review_packets",
     "auth",
     "invoices",
+    "export_seed_db",
 ]
 
 [tool.setuptools.packages.find]

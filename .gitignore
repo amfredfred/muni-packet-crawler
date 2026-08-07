@@ -3,9 +3,25 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Everything in data/ is a runtime artifact, not source: crawl/review logs,
-# and muni.db + .flask_secret_key, which are live security secrets once 2FA
-# setup completes (muni.db holds the registered TOTP secret in auth_totp;
-# .flask_secret_key signs session cookies) — committing either would let
-# anyone who reads the repo forge an authenticated session or bypass 2FA.
-data/
+# muni.db itself is never committed: once 2FA setup completes it also
+# holds the live TOTP secret in auth_totp, and once the invoicing feature
+# is used it holds real business/payment details (business_profile,
+# invoices). The genuinely static, safe-to-ship part — municipalities,
+# meetings, packets, blocked_sources — gets exported into the separately
+# committed data/muni_seed.db via src/export_seed_db.py instead; a fresh
+# deployment copies that in as its starting muni.db and grows its own
+# live secrets from there.
+data/muni.db
+data/muni.db-wal
+data/muni.db-shm
+
+# Flask session-signing key — a live security secret, same reasoning as
+# muni.db's auth_totp table above.
+data/.flask_secret_key
+
+# Runtime logs, not source.
+data/*.log
+
+# Uploaded business logo — per-deployment branding, not source.
+data/logo.png
+data/logo_watermark.png

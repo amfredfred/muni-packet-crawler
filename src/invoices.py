@@ -12,40 +12,93 @@ line items, and the total follows.
 """
 
 import io
+import re
 import sqlite3
 from datetime import date
+from pathlib import Path
 
+from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT
 
-ACCENT = colors.HexColor("#2955a3")
+DEFAULT_ACCENT = "#2955a3"
 MUTED = colors.HexColor("#666666")
 LIGHT_BG = colors.HexColor("#f2f4f7")
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+LOGO_PATH = DATA_DIR / "logo.png"
+LOGO_WATERMARK_PATH = DATA_DIR / "logo_watermark.png"
+LOGO_MAX_DIMENSION = 800  # px, for the stored full-opacity copy
+LOGO_BOX = (1.8 * inch, 0.9 * inch)  # fixed-size box the header logo is fitted into
+WATERMARK_ALPHA = 0.09  # faint background mark, not meant to compete with real content
+WATERMARK_WIDTH_FRACTION = 0.6  # of page width
+
+
+def save_logo(file_stream) -> None:
+    """Normalize an uploaded logo into two fixed files: a full-opacity PNG
+    for the header, and a faded copy for the watermark. Re-encoding through
+    Pillow (rather than saving the uploaded bytes as-is) both validates the
+    upload is actually a real image and strips anything else the original
+    file might carry (metadata, non-image payloads appended to the file)."""
+    img = PILImage.open(file_stream)
+    img.verify()
+    file_stream.seek(0)
+    img = PILImage.open(file_stream).convert("RGBA")
+    img.thumbnail((LOGO_MAX_DIMENSION, LOGO_MAX_DIMENSION))
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    img.save(LOGO_PATH, format="PNG")
+
+    alpha = img.split()[3].point(lambda p: int(p * WATERMARK_ALPHA))
+    watermark = img.copy()
+    watermark.putalpha(alpha)
+    watermark.save(LOGO_WATERMARK_PATH, format="PNG")
+
+
+def remove_logo() -> None:
+    for path in (LOGO_PATH, LOGO_WATERMARK_PATH):
+        path.unlink(missing_ok=True)
+
+
+def has_logo() -> bool:
+    return LOGO_PATH.exists()
+
+
+def resolve_accent_color(theme_color: str | None) -> "colors.Color":
+    # theme_color comes from a user-editable field (invoice or profile), so
+    # validate the format before trusting it as a hex color rather than
+    # letting a malformed value raise inside reportlab mid-render.
+    if theme_color and HEX_COLOR_RE.match(theme_color):
+        return colors.HexColor(theme_color)
+    return colors.HexColor(DEFAULT_ACCENT)
 
 
 def get_business_profile(conn: sqlite3.Connection) -> dict:
     row = conn.execute("SELECT * FROM business_profile WHERE id = 1").fetchone()
     if not row:
-        return {"name": "", "address": "", "phone": "", "email": ""}
+        return {"name": "", "address": "", "phone": "", "email": "", "account_details": "", "theme_color": DEFAULT_ACCENT}
     cols = [c[0] for c in conn.execute("SELECT * FROM business_profile WHERE id = 1").description]
     return dict(zip(cols, row))
 
 
-def save_business_profile(conn: sqlite3.Connection, name: str, address: str, phone: str, email: str) -> None:
+def save_business_profile(conn: sqlite3.Connection, name: str, address: str, phone: str, email: str, account_details: str = "", theme_color: str = "") -> None:
     conn.execute(
         """
-        INSERT INTO business_profile (id, name, address, phone, email)
-        VALUES (1, ?, ?, ?, ?)
+        INSERT INTO business_profile (id, name, address, phone, email, account_details, theme_color)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name=excluded.name, address=excluded.address,
             phone=excluded.phone, email=excluded.email,
+            account_details=excluded.account_details,
+            theme_color=excluded.theme_color,
             updated_at=CURRENT_TIMESTAMP
         """,
-        (name, address, phone, email),
+        (name, address, phone, email, account_details, theme_color or None),
     )
     conn.commit()
 
@@ -80,6 +133,33 @@ def _money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def _header_logo_flowable():
+    if not LOGO_PATH.exists():
+        return None
+    with PILImage.open(LOGO_PATH) as im:
+        src_w, src_h = im.size
+    max_w, max_h = LOGO_BOX
+    scale = min(max_w / src_w, max_h / src_h)
+    logo = RLImage(str(LOGO_PATH), width=src_w * scale, height=src_h * scale)
+    logo.hAlign = "CENTER"
+    return logo
+
+
+def _draw_watermark(canvas, doc):
+    if not LOGO_WATERMARK_PATH.exists():
+        return
+    with PILImage.open(LOGO_WATERMARK_PATH) as im:
+        src_w, src_h = im.size
+    page_w, page_h = letter
+    target_w = page_w * WATERMARK_WIDTH_FRACTION
+    target_h = src_h * (target_w / src_w)
+    x = (page_w - target_w) / 2
+    y = (page_h - target_h) / 2
+    canvas.saveState()
+    canvas.drawImage(str(LOGO_WATERMARK_PATH), x, y, width=target_w, height=target_h, mask="auto")
+    canvas.restoreState()
+
+
 def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -87,17 +167,23 @@ def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
         topMargin=0.6 * inch, bottomMargin=0.6 * inch,
         leftMargin=0.65 * inch, rightMargin=0.65 * inch,
     )
+    accent = resolve_accent_color(invoice.get("theme_color"))
+
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], textColor=ACCENT, fontSize=26, spaceAfter=0)
+    title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], textColor=accent, fontSize=26, spaceAfter=0)
     label_style = ParagraphStyle("Label", parent=styles["Normal"], textColor=MUTED, fontSize=8, spaceAfter=2, leading=10)
     body_style = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=14)
     meta_label_style = ParagraphStyle("MetaLabel", parent=styles["Normal"], fontSize=9, textColor=MUTED, alignment=TA_RIGHT)
     meta_value_style = ParagraphStyle("MetaValue", parent=styles["Normal"], fontSize=9, alignment=TA_RIGHT, fontName="Helvetica-Bold")
 
     flow = []
+    logo_flowable = _header_logo_flowable()
+    if logo_flowable:
+        flow.append(logo_flowable)
+        flow.append(Spacer(1, 10))
     flow.append(Paragraph("INVOICE", title_style))
     flow.append(Spacer(1, 4))
-    flow.append(HRFlowable(width="100%", thickness=2, color=ACCENT, spaceAfter=14))
+    flow.append(HRFlowable(width="100%", thickness=2, color=accent, spaceAfter=14))
 
     def block(label, name, address, phone, email):
         parts = [Paragraph(label, label_style)]
@@ -149,7 +235,7 @@ def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
     n_items = len(items)
     item_table = Table(table_data, colWidths=[4.7 * inch, 1.5 * inch])
     style = [
-        ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
+        ("BACKGROUND", (0, 0), (-1, 0), accent),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
@@ -161,7 +247,7 @@ def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
         ("LINEABOVE", (0, n_items + 1), (-1, n_items + 1), 1, colors.HexColor("#333333")),
         ("FONTNAME", (0, n_items + 2), (-1, n_items + 2), "Helvetica-Bold"),
         ("FONTSIZE", (0, n_items + 2), (-1, n_items + 2), 12),
-        ("TEXTCOLOR", (0, n_items + 2), (-1, n_items + 2), ACCENT),
+        ("TEXTCOLOR", (0, n_items + 2), (-1, n_items + 2), accent),
         ("LINEABOVE", (0, n_items + 2), (-1, n_items + 2), 0.5, colors.HexColor("#dddddd")),
     ]
     for row in range(1, n_items + 1):
@@ -170,10 +256,15 @@ def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
     item_table.setStyle(TableStyle(style))
     flow.append(item_table)
 
+    if invoice.get("account_details"):
+        flow.append(Spacer(1, 20))
+        flow.append(Paragraph("Account Details for Payment", label_style))
+        flow.append(Paragraph(invoice["account_details"].replace("\n", "<br/>"), body_style))
+
     if invoice.get("notes"):
         flow.append(Spacer(1, 20))
         flow.append(Paragraph("Notes", label_style))
         flow.append(Paragraph(invoice["notes"].replace("\n", "<br/>"), body_style))
 
-    doc.build(flow)
+    doc.build(flow, onFirstPage=_draw_watermark, onLaterPages=_draw_watermark)
     return buf.getvalue()

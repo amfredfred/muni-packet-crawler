@@ -14,6 +14,24 @@
     </form>
   </p>
 
+  <details style="margin-bottom:16px">
+    <summary class="muted" style="cursor:pointer">Paste JSON to auto-fill this form</summary>
+    <p class="muted" style="font-size:13px">
+      Paste an object with any of these keys — anything you omit is left as-is.
+      <code>items</code> replaces the line items table below.
+    </p>
+    <pre style="background:var(--bg); padding:10px; border-radius:6px; font-size:12px; overflow:auto">{
+  "from_name": "Acme Consulting LLC", "from_address": "...", "from_phone": "...", "from_email": "...",
+  "to_name": "Jane Doe", "to_address": "...", "to_phone": "...", "to_email": "...",
+  "invoice_date": "2026-08-07", "due_date": "2026-09-01", "payment_method": "Wire Transfer",
+  "notes": "Thank you for your business.",
+  "account_details": "Bank: First National · Account: 000123456 · Routing: 021000021",
+  "items": [{"description": "Referral fee", "amount": 3000}, {"description": "Admin fee", "amount": 150}]
+}</pre>
+    <textarea id="json-input" rows="6" style="width:100%" placeholder="Paste JSON here…"></textarea>
+    <p><button type="button" class="secondary" onclick="applyJson()">Apply JSON</button></p>
+  </details>
+
   <form method="post" action="{{ url_for('update_invoice', invoice_id=inv.id) }}">
     <div style="display:flex; gap:24px; flex-wrap:wrap">
       <div style="flex:1; min-width:280px">
@@ -22,6 +40,10 @@
         <p><label>Address<br><input type="text" name="from_address" style="width:100%" value="{{ inv.from_address or '' }}"></label></p>
         <p><label>Phone<br><input type="text" name="from_phone" style="width:100%" value="{{ inv.from_phone or '' }}"></label></p>
         <p><label>Email<br><input type="email" name="from_email" style="width:100%" value="{{ inv.from_email or '' }}"></label></p>
+        <p><label>Account details for payment<br>
+          <textarea name="account_details" id="account-details-input" style="width:100%" rows="3">{{ inv.account_details or '' }}</textarea>
+        </label></p>
+        <p class="muted" style="font-size:12px; margin-top:-8px">Only shown on the PDF if filled in.</p>
       </div>
       <div style="flex:1; min-width:280px">
         <h3>To</h3>
@@ -53,20 +75,26 @@
     <p><button type="button" class="secondary" onclick="addItemRow()">+ Add line item</button></p>
     <p style="font-size:16px"><strong>Total: $<span id="total-display">{{ '%.2f'|format(total) }}</span></strong></p>
 
-    <p><label>Notes<br><textarea name="notes" style="width:100%" rows="3">{{ inv.notes or '' }}</textarea></label></p>
+    <p><label>Notes<br><textarea name="notes" id="notes-input" style="width:100%" rows="3">{{ inv.notes or '' }}</textarea></label></p>
 
     <button type="submit">Save changes</button>
   </form>
 </div>
 
 <script>
-function addItemRow() {
+function addItemRow(description, amount) {
   var table = document.getElementById('items-table');
   var row = table.insertRow(-1);
   row.innerHTML =
     '<td><input type="text" name="item_description" style="width:100%"></td>' +
     '<td><input type="number" step="0.01" class="item-amount" name="item_amount" style="width:110px" oninput="recalcTotal()"></td>' +
     '<td><button type="button" class="secondary" onclick="this.closest(\'tr\').remove(); recalcTotal()">remove</button></td>';
+  if (description !== undefined) row.cells[0].querySelector('input').value = description;
+  if (amount !== undefined) row.cells[1].querySelector('input').value = amount;
+}
+function clearItemRows() {
+  var table = document.getElementById('items-table');
+  while (table.rows.length > 1) table.deleteRow(1);
 }
 function recalcTotal() {
   var total = 0;
@@ -74,6 +102,33 @@ function recalcTotal() {
     total += parseFloat(el.value) || 0;
   });
   document.getElementById('total-display').textContent = total.toFixed(2);
+}
+function applyJson() {
+  var raw = document.getElementById('json-input').value.trim();
+  if (!raw) return;
+  var data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    alert('That isn\'t valid JSON: ' + e.message);
+    return;
+  }
+  var fields = ['from_name', 'from_address', 'from_phone', 'from_email',
+                'to_name', 'to_address', 'to_phone', 'to_email',
+                'invoice_date', 'due_date', 'payment_method'];
+  fields.forEach(function (key) {
+    if (data[key] !== undefined) {
+      var el = document.querySelector('[name="' + key + '"]');
+      if (el) el.value = data[key];
+    }
+  });
+  if (data.notes !== undefined) document.getElementById('notes-input').value = data.notes;
+  if (data.account_details !== undefined) document.getElementById('account-details-input').value = data.account_details;
+  if (Array.isArray(data.items)) {
+    clearItemRows();
+    data.items.forEach(function (item) { addItemRow(item.description, item.amount); });
+    recalcTotal();
+  }
 }
 </script>
 

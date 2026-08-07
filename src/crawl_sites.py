@@ -58,7 +58,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from date_extract import extract_meeting_date, is_upcoming
-from db import get_connection
+from db import get_connection, redirect_console_if_headless
 from pdf_review import extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
 
 # License/permit-style categories only: for these, a packet is only kept
@@ -567,6 +567,7 @@ def write_result(cur, muni_id: int, result: dict) -> str:
 
 
 def main() -> None:
+    redirect_console_if_headless("crawl_engine.log")
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", help="Only crawl municipalities in this state")
     parser.add_argument("--limit", type=int, help="Max number of municipalities to crawl this run")

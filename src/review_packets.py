@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db import get_connection
+from db import get_connection, redirect_console_if_headless
 from pdf_review import review_pdf
 
 
@@ -28,6 +28,7 @@ def process_one(packet_id: int, url: str) -> tuple[int, dict]:
 
 
 def main() -> None:
+    redirect_console_if_headless("review_engine.log")
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", help="Only review packets for municipalities in this state")
     parser.add_argument("--board-type", help="Only review packets matching this exact board_type")

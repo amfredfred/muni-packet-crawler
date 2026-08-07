@@ -1,10 +1,28 @@
 """SQLite schema and connection helper for the municipality/meeting/packet pipeline."""
 
 import sqlite3
+import sys
 import threading
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "muni.db"
+DATA_DIR = DB_PATH.parent
+
+
+def redirect_console_if_headless(log_filename: str) -> None:
+    """Under pythonw.exe (no console attached — used so Task Scheduler can
+    run this with no visible terminal window), sys.stdout/sys.stderr are
+    None, not just discarded. Any bare print() would raise AttributeError
+    and crash the process instantly on the very first line of output.
+    Call this at the very start of main() to redirect to a log file
+    instead; under a normal python.exe console, sys.stdout is a real
+    stream and this is a no-op."""
+    if sys.stdout is not None:
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = open(DATA_DIR / log_filename, "a", buffering=1, encoding="utf-8")
+    sys.stdout = log_file
+    sys.stderr = log_file
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS municipalities (
@@ -84,6 +102,8 @@ CREATE TABLE IF NOT EXISTS business_profile (
     address TEXT,
     phone TEXT,
     email TEXT,
+    account_details TEXT,
+    theme_color TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -127,6 +147,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     commission_type_id INTEGER REFERENCES commission_types(id),
     base_amount REAL,
     notes TEXT,
+    account_details TEXT,
+    theme_color TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -160,6 +182,10 @@ MIGRATIONS = [
     ("packets", "review_method", "ALTER TABLE packets ADD COLUMN review_method TEXT"),
     ("packets", "applicant_snippet", "ALTER TABLE packets ADD COLUMN applicant_snippet TEXT"),
     ("packets", "priority", "ALTER TABLE packets ADD COLUMN priority INTEGER DEFAULT 0"),
+    ("business_profile", "account_details", "ALTER TABLE business_profile ADD COLUMN account_details TEXT"),
+    ("invoices", "account_details", "ALTER TABLE invoices ADD COLUMN account_details TEXT"),
+    ("business_profile", "theme_color", "ALTER TABLE business_profile ADD COLUMN theme_color TEXT"),
+    ("invoices", "theme_color", "ALTER TABLE invoices ADD COLUMN theme_color TEXT"),
 ]
 
 

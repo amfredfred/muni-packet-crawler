@@ -8,8 +8,13 @@
 #   Modeled on trade-relay/execution-engine/install.ps1's approach for the
 #   same reason that applies here too, in a milder form: Task Scheduler
 #   running "at logon" in the interactive session is simpler to reason
-#   about, debug, and watch (a visible/loggable process) than a Session-0
-#   service, with no extra service-wrapper code required.
+#   about and debug than a Session-0 service, with no extra service-wrapper
+#   code required. Each component actually runs via pythonw.exe (the
+#   windowless interpreter) rather than the console-mode muni-*.exe
+#   wrappers pip generates, so nothing pops up a terminal window at logon
+#   or at the nightly batch times — check data/webapp.log,
+#   data/crawl_engine.log, and data/review_engine.log for output instead
+#   of watching a console live.
 #
 # COMPONENTS:
 #   webapp - persistent. Logon trigger, restarts itself on crash via the
@@ -60,24 +65,41 @@ $VenvScripts = Join-Path $ProjectDir "$VenvName\Scripts"
 
 # ── Runs install/uninstall/update for exactly one component ────────────────
 function Invoke-ForComponent([string]$component, [string]$action) {
+    # Console-script wrappers (muni-webapp.exe etc.) are always built for the
+    # console subsystem by setuptools — running one under Task Scheduler's
+    # "AtLogOn, Interactive" trigger leaves a visible terminal window sitting
+    # open for as long as the process runs. pythonw.exe is the windowless
+    # Python interpreter that ships with every install/venv; running the
+    # actual .py entry point through it produces no window at all. The
+    # console .exe's existence is still checked below, purely as a signal
+    # that `pip install -e .` has actually been run for this venv — it's
+    # never executed.
+    $pythonw = Join-Path $VenvScripts "pythonw.exe"
+
     switch ($component) {
         "webapp" {
-            $taskName    = "Muni Webapp"
-            $description = "Muni Packet Crawler control panel - dashboard, engine controls, packet review"
-            $exe         = Join-Path $VenvScripts "muni-webapp.exe"
-            $persistent  = $true
+            $taskName      = "Muni Webapp"
+            $description   = "Muni Packet Crawler control panel - dashboard, engine controls, packet review"
+            $installMarker = Join-Path $VenvScripts "muni-webapp.exe"
+            $exe           = $pythonw
+            $scriptArgs    = "`"$(Join-Path $ProjectDir 'src\webapp.py')`""
+            $persistent    = $true
         }
         "crawl" {
-            $taskName    = "Muni Crawl"
-            $description = "Muni Packet Crawler - crawls municipal sites for meeting packets (recurring daily batch)"
-            $exe         = Join-Path $VenvScripts "muni-crawl.exe"
-            $persistent  = $false
+            $taskName      = "Muni Crawl"
+            $description   = "Muni Packet Crawler - crawls municipal sites for meeting packets (recurring daily batch)"
+            $installMarker = Join-Path $VenvScripts "muni-crawl.exe"
+            $exe           = $pythonw
+            $scriptArgs    = "`"$(Join-Path $ProjectDir 'src\crawl_sites.py')`""
+            $persistent    = $false
         }
         "review" {
-            $taskName    = "Muni Review"
-            $description = "Muni Packet Crawler - OCR/applicant-detail pass over saved packets (recurring daily batch)"
-            $exe         = Join-Path $VenvScripts "muni-review-packets.exe"
-            $persistent  = $false
+            $taskName      = "Muni Review"
+            $description   = "Muni Packet Crawler - OCR/applicant-detail pass over saved packets (recurring daily batch)"
+            $installMarker = Join-Path $VenvScripts "muni-review-packets.exe"
+            $exe           = $pythonw
+            $scriptArgs    = "`"$(Join-Path $ProjectDir 'src\review_packets.py')`""
+            $persistent    = $false
         }
     }
 
@@ -110,13 +132,18 @@ function Invoke-ForComponent([string]$component, [string]$action) {
     }
 
     function Do-Install {
-        if (-not (Test-Path -LiteralPath $exe)) {
+        if (-not (Test-Path -LiteralPath $installMarker)) {
             Write-Host ""
-            Write-Host "ERROR: $exe not found." -ForegroundColor Red
+            Write-Host "ERROR: $installMarker not found." -ForegroundColor Red
             Write-Host "  Set up the venv and install this project into it first:" -ForegroundColor Yellow
             Write-Host "    python -m venv $VenvName" -ForegroundColor Yellow
             Write-Host "    $VenvName\Scripts\pip install -e `".[ocr]`"" -ForegroundColor Yellow
             Write-Host "  (the [ocr] extra is optional - only needed for the OCR fallback in review)" -ForegroundColor DarkGray
+            exit 1
+        }
+        if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Host ""
+            Write-Host "ERROR: $exe not found (expected pythonw.exe alongside the venv's python.exe)." -ForegroundColor Red
             exit 1
         }
 
@@ -126,10 +153,10 @@ function Invoke-ForComponent([string]$component, [string]$action) {
         Write-Host ""
         Write-Host "  Registering scheduled task..."
         Write-Host "    Task : $TaskFolder$taskName"
-        Write-Host "    Exe  : $exe"
+        Write-Host "    Exe  : $exe $scriptArgs"
         Write-Host "    CWD  : $ProjectDir"
 
-        $taskAction = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $ProjectDir
+        $taskAction = New-ScheduledTaskAction -Execute $exe -Argument $scriptArgs -WorkingDirectory $ProjectDir
 
         if ($persistent) {
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
