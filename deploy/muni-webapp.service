@@ -1,0 +1,14 @@
+[Unit]
+Description=Muni Packet Crawler - control panel (dashboard, engine controls, invoicing)
+After=network.target
+
+[Service]
+Type=simple
+User=__DEPLOY_USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/venv/bin/python src/webapp.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

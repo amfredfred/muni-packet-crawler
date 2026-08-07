@@ -25,6 +25,7 @@ Two-tier extraction, in order:
 import io
 import re
 import shutil
+from pathlib import Path
 
 import requests
 from pypdf import PdfReader
@@ -33,6 +34,29 @@ MAX_PDF_BYTES = 25 * 1024 * 1024  # skip absurdly large files rather than hang o
 DOWNLOAD_TIMEOUT = 30
 MIN_NATIVE_TEXT_CHARS = 40  # below this, treat native extraction as "no text layer"
 MAX_OCR_PAGES = 10  # cap OCR cost on long scanned documents
+
+# Tesseract/Poppler are looked for on PATH first (shutil.which), but the
+# installer doesn't necessarily add itself to PATH (it may install with
+# UAC-elevated admin rights and never touch this user's PATH, or land in
+# a per-user location that was never added to PATH in the first place).
+# Both plausible install locations are checked as a fallback rather than
+# requiring a PATH/environment-variable change, which would need
+# re-verifying on every process launch anyway.
+_TESSERACT_FALLBACK_EXES = [
+    Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
+    Path.home() / "AppData" / "Local" / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+]
+# poppler-windows releases unzip into a version-numbered subfolder
+# (poppler-XX.YY.Z/Library/bin/...) — globbed rather than hardcoded so a
+# future reinstall/upgrade to a newer release doesn't silently break this.
+_POPPLER_FALLBACK_BASE = Path.home() / "AppData" / "Local" / "Programs" / "poppler"
+
+
+def _resolve_poppler_fallback_bin_dir() -> Path | None:
+    if not _POPPLER_FALLBACK_BASE.is_dir():
+        return None
+    matches = sorted(_POPPLER_FALLBACK_BASE.glob("poppler-*/Library/bin/pdftoppm.exe"))
+    return matches[-1].parent if matches else None
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -72,12 +96,31 @@ def has_applicant_and_contact(text: str) -> tuple[bool, list[str], list[str]]:
     return bool(applicant_matches and emails), applicant_matches, emails
 
 
+def _find_tesseract_exe() -> str | None:
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for candidate in _TESSERACT_FALLBACK_EXES:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _find_poppler_bin_dir() -> str | None:
+    """None means "on PATH already, pdf2image doesn't need an explicit
+    poppler_path"; otherwise the specific bin directory to pass it."""
+    if shutil.which("pdftoppm"):
+        return None
+    fallback_dir = _resolve_poppler_fallback_bin_dir()
+    return str(fallback_dir) if fallback_dir else None
+
+
 def _tesseract_available() -> bool:
-    return shutil.which("tesseract") is not None
+    return _find_tesseract_exe() is not None
 
 
 def _poppler_available() -> bool:
-    return shutil.which("pdftoppm") is not None
+    return shutil.which("pdftoppm") is not None or _resolve_poppler_fallback_bin_dir() is not None
 
 
 def fetch_pdf_bytes(url: str) -> bytes | None:
@@ -101,14 +144,64 @@ def extract_native_text(pdf_bytes: bytes) -> str:
         return ""
 
 
+EMBEDDED_PDF_LINK_RE = re.compile(r"https?://[^\s\"'<>)]+\.pdf\b", re.I)
+
+
+def extract_links_from_pdf(pdf_bytes: bytes, source_url: str) -> list[str]:
+    """Finds links to OTHER pdfs embedded inside this one — either real
+    link annotations (clickable in a PDF viewer) or plain URLs printed as
+    visible text (a lot of municipal agenda templates just print the
+    packet's URL rather than hyperlinking it). Some municipalities'
+    agendas point to a packet hosted at a separate URL that's never
+    linked from any HTML page a normal crawl would visit — the only
+    place it exists is inside the agenda PDF itself."""
+    found: list[str] = []
+    seen = {source_url}
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        return found
+
+    for page in reader.pages:
+        try:
+            annotations = page.get("/Annots") or []
+            for annot_ref in annotations:
+                annot = annot_ref.get_object()
+                action = annot.get("/A")
+                uri = action.get("/URI") if action else None
+                if uri and re.search(r"\.pdf\b", uri, re.I) and uri not in seen:
+                    seen.add(uri)
+                    found.append(uri)
+        except Exception:
+            pass
+
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        for m in EMBEDDED_PDF_LINK_RE.finditer(text):
+            uri = m.group(0)
+            if uri not in seen:
+                seen.add(uri)
+                found.append(uri)
+
+    return found
+
+
 def extract_ocr_text(pdf_bytes: bytes) -> str | None:
-    if not (_tesseract_available() and _poppler_available()):
+    tesseract_exe = _find_tesseract_exe()
+    if not tesseract_exe or not _poppler_available():
         return None
     try:
         import pytesseract
         from pdf2image import convert_from_bytes
 
-        images = convert_from_bytes(pdf_bytes, first_page=1, last_page=MAX_OCR_PAGES)
+        pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+        convert_kwargs = {"first_page": 1, "last_page": MAX_OCR_PAGES}
+        poppler_dir = _find_poppler_bin_dir()
+        if poppler_dir:
+            convert_kwargs["poppler_path"] = poppler_dir
+        images = convert_from_bytes(pdf_bytes, **convert_kwargs)
         return "\n".join(pytesseract.image_to_string(img) for img in images)
     except Exception:
         return None

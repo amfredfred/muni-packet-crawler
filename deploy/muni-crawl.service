@@ -1,0 +1,9 @@
+[Unit]
+Description=Muni Packet Crawler - site crawler (one-shot batch run)
+After=network.target
+
+[Service]
+Type=oneshot
+User=__DEPLOY_USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/venv/bin/python src/crawl_sites.py

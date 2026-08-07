@@ -66,7 +66,7 @@ from bs4 import BeautifulSoup
 
 from date_extract import extract_meeting_date, is_upcoming
 from db import get_connection
-from pdf_review import extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
+from pdf_review import extract_links_from_pdf, extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
 
 # License/permit-style categories only: for these, a packet is only kept
 # if the actual PDF names a specific applicant/owner AND a contact email —
@@ -102,6 +102,7 @@ HEADERS = {
 REQUEST_TIMEOUT = 15
 CANDIDATE_PAGES_TO_VISIT = 2
 FOLLOW_LIMIT = 3
+MAX_EMBEDDED_PDF_LINKS = 3  # per source PDF — bounds cost, these are rare
 
 CIVIC_HOSTS = [
     "civicplus.com",
@@ -297,6 +298,45 @@ def fetch(url: str, retries: int = 1) -> requests.Response | None:
     return None
 
 
+NAV_SECTION_RE = re.compile(
+    r"\b(government|departments?|boards?(?:\s*(?:and|&)\s*commissions?)?|commissions?|"
+    r"committees?|administration|elected\s+officials|city\s+hall|town\s+hall|municipal)\b",
+    re.I,
+)
+MAX_NAV_PAGES_TO_FOLLOW = 3
+
+
+def find_nav_section_pages(html: str, base_url: str) -> list[str]:
+    """Fallback for sites where the real board/agenda link is nested one
+    level deeper than the homepage — behind a generic "Government" or
+    "Boards & Commissions" nav item rather than named directly (a multi-
+    level government dropdown menu). Only used when find_candidate_pages
+    finds nothing at all on the homepage itself, to avoid extra requests
+    on sites that already work fine without it."""
+    soup = BeautifulSoup(html, "html.parser")
+    seen: set[str] = set()
+    pages: list[str] = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+            continue
+        text = a.get_text(strip=True)
+        if not NAV_SECTION_RE.search(text):
+            continue
+        url = urljoin(base_url, href)
+        try:
+            hostname = urlparse(url).hostname or ""
+        except ValueError:
+            continue
+        if not hostname or is_vendor_marketing_domain(hostname) or url in seen:
+            continue
+        seen.add(url)
+        pages.append(url)
+        if len(pages) >= MAX_NAV_PAGES_TO_FOLLOW:
+            break
+    return pages
+
+
 def find_candidate_pages(html: str, base_url: str) -> list[tuple[str, str]]:
     """Returns (url, link_text) pairs, best-scored first. link_text is kept
     and passed downstream as page context: a link literally reading
@@ -434,6 +474,43 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
     return direct, candidates
 
 
+def follow_pdf_embedded_links(packets: list[dict]) -> list[dict]:
+    """For each already-confirmed PDF packet, checks inside that PDF for
+    links to OTHER packet PDFs (see pdf_review.extract_links_from_pdf) —
+    some municipalities host the actual packet at a separate URL that's
+    only ever linked from within the agenda PDF itself, never from any
+    HTML page a normal crawl would visit. Best-effort and capped: a fetch
+    failure or unparseable PDF just yields nothing extra from that one
+    packet, not a crawl failure. Inherits the parent packet's date/board
+    type — a linked packet found this way is presumptively part of the
+    same meeting/board."""
+    extra: list[dict] = []
+    seen_urls = {p["url"] for p in packets}
+    for p in packets:
+        if p["match_reason"] != "pdf":
+            continue
+        pdf_bytes = fetch_pdf_bytes(p["url"])
+        if pdf_bytes is None:
+            continue
+        linked_urls = extract_links_from_pdf(pdf_bytes, p["url"])
+        for link_url in linked_urls[:MAX_EMBEDDED_PDF_LINKS]:
+            if link_url in seen_urls:
+                continue
+            seen_urls.add(link_url)
+            extra.append(
+                {
+                    "url": link_url,
+                    "title": link_url.rsplit("/", 1)[-1] or link_url,
+                    "match_reason": "pdf",
+                    "meeting_date": p["meeting_date"],
+                    "is_upcoming": p["is_upcoming"],
+                    "board_type": p["board_type"],
+                    "found_via_pdf_link": True,
+                }
+            )
+    return extra
+
+
 def save_meeting_and_packets(
     cur, municipality_id: int, source_url: str, direct: list[dict], subpage_results: list[tuple[dict, list[dict]]]
 ) -> int:
@@ -455,14 +532,15 @@ def save_meeting_and_packets(
     for p in direct:
         if p["is_upcoming"] == 0:  # confirmed past — skip; unknown (None) still saved
             continue
+        found_via = "pdf_link" if p.get("found_via_pdf_link") else "direct"
         cur.execute(
             """
             INSERT INTO packets (meeting_id, municipality_id, url, title, match_reason, found_via, meeting_date, is_upcoming, board_type)
-            VALUES (?, ?, ?, ?, ?, 'direct', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(municipality_id, url) DO UPDATE SET
                 meeting_date=excluded.meeting_date, is_upcoming=excluded.is_upcoming, board_type=excluded.board_type
             """,
-            (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], p["meeting_date"], p["is_upcoming"], p["board_type"]),
+            (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], found_via, p["meeting_date"], p["is_upcoming"], p["board_type"]),
         )
         packet_count += 1
 
@@ -470,14 +548,15 @@ def save_meeting_and_packets(
         for p in sub_direct:
             if p["is_upcoming"] == 0:
                 continue
+            found_via = "pdf_link" if p.get("found_via_pdf_link") else "subpage"
             cur.execute(
                 """
                 INSERT INTO packets (meeting_id, municipality_id, url, title, match_reason, found_via, meeting_date, is_upcoming, board_type)
-                VALUES (?, ?, ?, ?, ?, 'subpage', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(municipality_id, url) DO UPDATE SET
                     meeting_date=excluded.meeting_date, is_upcoming=excluded.is_upcoming, board_type=excluded.board_type
                 """,
-                (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], p["meeting_date"], p["is_upcoming"], p["board_type"]),
+                (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], found_via, p["meeting_date"], p["is_upcoming"], p["board_type"]),
             )
             packet_count += 1
 
@@ -506,6 +585,18 @@ def crawl_municipality(official_url: str) -> dict:
 
     candidates = find_candidate_pages(home_resp.text, home_resp.url)
     if not candidates:
+        # Homepage itself names nothing directly — some sites bury the
+        # real link one level deeper behind a generic "Government" or
+        # "Boards & Commissions" nav item (a multi-level government
+        # dropdown menu) instead of linking it from the homepage at all.
+        for nav_url in find_nav_section_pages(home_resp.text, home_resp.url):
+            nav_resp = fetch(nav_url)
+            if nav_resp is None:
+                continue
+            candidates = find_candidate_pages(nav_resp.text, nav_resp.url)
+            if candidates:
+                break
+    if not candidates:
         result["status"] = "no_agenda_found"
         return result
 
@@ -515,6 +606,7 @@ def crawl_municipality(official_url: str) -> dict:
             continue
 
         direct, subpage_candidates = extract_packets(page_resp.text, page_resp.url, page_context)
+        direct.extend(follow_pdf_embedded_links(direct))
 
         subpage_results = []
         for sub in subpage_candidates[:FOLLOW_LIMIT]:
@@ -524,6 +616,7 @@ def crawl_municipality(official_url: str) -> dict:
                 continue
             sub_context = page_context or sub["title"]
             sub_direct, _ = extract_packets(sub_resp.text, sub_resp.url, sub_context)
+            sub_direct.extend(follow_pdf_embedded_links(sub_direct))
             subpage_results.append((sub, sub_direct))
 
         result["meetings"].append(
