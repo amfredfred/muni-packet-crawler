@@ -1,5 +1,6 @@
 """SQLite schema and connection helper for the municipality/meeting/packet pipeline."""
 
+import shutil
 import sqlite3
 import sys
 import threading
@@ -7,6 +8,12 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "muni.db"
 DATA_DIR = DB_PATH.parent
+
+# A fresh deployment (e.g. a VPS clone) has no muni.db yet — only the
+# committed snapshot of the static tables (see export_seed_db.py). muni.db
+# itself is never committed since it also holds the live TOTP secret and
+# real business/invoice data once those features are used.
+SEED_DB_PATH = DATA_DIR / "muni_seed.db"
 
 
 def redirect_console_if_headless(log_filename: str) -> None:
@@ -222,6 +229,11 @@ _setup_lock = threading.Lock()
 _setup_done = False
 
 
+def _seed_from_snapshot_if_missing() -> None:
+    if not DB_PATH.exists() and SEED_DB_PATH.exists():
+        shutil.copy2(SEED_DB_PATH, DB_PATH)
+
+
 def get_connection() -> sqlite3.Connection:
     """Each caller should get its own connection — sqlite3 connections
     aren't safely shared across threads. WAL mode lets concurrent readers
@@ -236,9 +248,19 @@ def get_connection() -> sqlite3.Connection:
     municipality_id backfill and dedup cleanup) on every single
     municipality processed. That constant redundant write traffic was the
     actual cause of 'database is locked' errors once workers were added,
-    not the crawl's own (much lighter) per-municipality writes."""
+    not the crawl's own (much lighter) per-municipality writes.
+
+    The seed-from-snapshot check has to happen here too (before connect()
+    creates an empty muni.db just by opening a path that doesn't exist yet)
+    rather than as a separate setup script — this way every entry point
+    (webapp, crawl, review, build_index) gets a pre-populated database on
+    a fresh deployment automatically, with no manual step to forget."""
     global _setup_done
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not _setup_done:
+        with _setup_lock:
+            if not _setup_done:
+                _seed_from_snapshot_if_missing()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
