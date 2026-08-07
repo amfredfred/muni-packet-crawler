@@ -119,11 +119,21 @@ function Invoke-ForComponent([string]$component, [string]$action) {
         }
     }
     function Cleanup-Orphans {
+        # Matching only on the full absolute project path misses anything
+        # started with a relative path (e.g. `cd project && python
+        # src\webapp.py`, the normal way to run this by hand for dev/
+        # testing) — that process's CommandLine never contains $ProjectDir
+        # at all, so it silently evades cleanup. Werkzeug's dev server sets
+        # SO_REUSEADDR, so a second instance binding the same port doesn't
+        # even error — it just silently coexists, and which one actually
+        # answers a given request becomes unpredictable. Matching on the
+        # known entry-point script names catches both launch styles.
         $escapedDir = [regex]::Escape($ProjectDir)
+        $scriptNames = "webapp\.py|crawl_sites\.py|review_packets\.py"
         Get-CimInstance Win32_Process | Where-Object {
             $_.ProcessId -ne $PID -and
             $_.CommandLine -and
-            $_.CommandLine -match $escapedDir -and
+            ($_.CommandLine -match $escapedDir -or $_.CommandLine -match $scriptNames) -and
             ($_.Name -like "muni-*" -or $_.Name -like "python*")
         } | ForEach-Object {
             Write-Host "  Stopping orphan PID $($_.ProcessId): $($_.Name)"
