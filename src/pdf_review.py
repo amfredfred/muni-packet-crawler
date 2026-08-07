@@ -46,6 +46,31 @@ APPLICANT_OWNER_RE = re.compile(
 )
 MAX_SNIPPET_MATCHES = 5
 
+# A reasonably strict RFC-5322-ish match — good enough to tell "a real
+# email address is present" from "no contact info at all" without trying
+# to be a full validator (this is a save-gate heuristic, not a mail
+# server's input validation).
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+
+def find_emails(text: str) -> list[str]:
+    seen = []
+    for m in EMAIL_RE.finditer(text):
+        addr = m.group(0)
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
+def has_applicant_and_contact(text: str) -> tuple[bool, list[str], list[str]]:
+    """The stricter save-gate check: real applicant/owner info AND a real
+    contact email, both present in the same document — not just one or the
+    other. Returns (passes, applicant_matches, emails) so callers can log
+    exactly what was found either way."""
+    applicant_matches = find_applicant_owner_info(text)
+    emails = find_emails(text)
+    return bool(applicant_matches and emails), applicant_matches, emails
+
 
 def _tesseract_available() -> bool:
     return shutil.which("tesseract") is not None

@@ -30,21 +30,38 @@
 
 <div class="card">
   <h3 style="margin-top:0">Packets ({{ packets|length }})</h3>
+  <form class="filters" method="get">
+    <label class="muted" style="font-size:13px">from
+      <input type="date" name="date_from" value="{{ date_from }}">
+    </label>
+    <label class="muted" style="font-size:13px">to
+      <input type="date" name="date_to" value="{{ date_to }}">
+    </label>
+    <button type="submit">Filter</button>
+    {% if date_from or date_to %}<a class="btn secondary" href="{{ url_for('municipality_detail', muni_id=m.id) }}">clear</a>{% endif %}
+  </form>
   {% if packets %}
   <table>
-    <tr><th>Date</th><th>Keyword</th><th>Title</th><th>Match</th><th>Via</th><th>Reviewed</th><th></th></tr>
+    <tr><th>Date</th><th>Keyword</th><th>Title</th><th>Match</th><th>Via</th><th>Priority</th><th>Reviewed</th><th></th></tr>
     {% for p in packets %}
-    <tr>
+    <tr data-packet-row="{{ p.id }}" class="{{ 'reviewed' if p.reviewed }}">
       <td>{{ p.meeting_date or '?' }}</td>
       <td class="muted">{{ p.board_type or '—' }}</td>
-      <td><a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.title|truncate(60) }}</a></td>
+      <td><a href="{{ p.url }}" target="_blank" rel="noopener" class="packet-link" data-packet-id="{{ p.id }}">{{ p.title|truncate(60) }}</a></td>
       <td class="muted">{{ p.match_reason }}</td>
       <td class="muted">{{ p.found_via }}</td>
-      <td>{{ 'yes' if p.reviewed else 'no' }}</td>
+      <td>
+        {% if p.priority %}
+          <span class="badge ok" title="{{ p.applicant_snippet or '' }}">priority</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td data-reviewed-cell="{{ p.id }}">{{ 'yes' if p.reviewed else 'no' }}</td>
       <td>
         <form method="post" action="{{ url_for('toggle_reviewed', packet_id=p.id) }}" class="inline">
           <input type="hidden" name="next" value="{{ request.path }}">
-          <button type="submit" class="secondary">{{ 'unmark' if p.reviewed else 'mark reviewed' }}</button>
+          <button type="submit" class="secondary" data-reviewed-btn="{{ p.id }}">{{ 'unmark' if p.reviewed else 'mark reviewed' }}</button>
         </form>
       </td>
     </tr>
@@ -54,5 +71,21 @@
   <p class="muted">No packets found yet for this municipality.</p>
   {% endif %}
 </div>
+
+<script>
+document.querySelectorAll('.packet-link').forEach(function (link) {
+  link.addEventListener('click', function () {
+    var id = link.dataset.packetId;
+    fetch('/packets/' + id + '/mark_reviewed', { method: 'POST' }).then(function () {
+      var row = document.querySelector('[data-packet-row="' + id + '"]');
+      var cell = document.querySelector('[data-reviewed-cell="' + id + '"]');
+      var btn = document.querySelector('[data-reviewed-btn="' + id + '"]');
+      if (row) row.classList.add('reviewed');
+      if (cell) cell.textContent = 'yes';
+      if (btn) btn.textContent = 'unmark';
+    });
+  });
+});
+</script>
 
 {% endblock %}

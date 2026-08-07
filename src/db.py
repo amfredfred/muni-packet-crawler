@@ -57,6 +57,23 @@ CREATE TABLE IF NOT EXISTS auth_totp (
     secret TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- State-directory sources that were blocked, dead, or otherwise not
+-- scrapable when last checked (see README's "Checked and ruled out"
+-- section for the full research). last_status lets the dashboard's retry
+-- button re-test a specific URL later without re-deriving this list from
+-- scratch — many of these are bot-blocks or outages that could resolve on
+-- their own over time.
+CREATE TABLE IF NOT EXISTS blocked_sources (
+    id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL,
+    url TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    category TEXT NOT NULL,
+    last_checked_at TEXT,
+    last_status TEXT DEFAULT 'unknown',
+    UNIQUE(state, url)
+);
 """
 
 # Added after the initial schema — kept as migrations rather than folded into

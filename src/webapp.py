@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import requests
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,9 +25,31 @@ from crawl_sites import BOARD_KEYWORDS
 from db import get_connection
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-LOG_PATH = BASE_DIR / "data" / "crawl_engine.log"
 SECRET_KEY_PATH = BASE_DIR / "data" / ".flask_secret_key"
 PAGE_SIZE = 50
+
+RETRY_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+}
+
+# Both background scripts this webapp can start/stop, keyed by the name
+# used in URLs (/engine/<name>/start). Each gets its own subprocess slot and
+# log file so the crawl and the OCR/applicant reviewer can run (or not)
+# independently — starting one never touches the other's tracked state.
+ENGINES = {
+    "crawl": {
+        "script": "crawl_sites.py",
+        "log": BASE_DIR / "data" / "crawl_engine.log",
+        "label": "Crawl Engine",
+    },
+    "review": {
+        "script": "review_packets.py",
+        "log": BASE_DIR / "data" / "review_engine.log",
+        "label": "Review Engine (OCR / applicant check)",
+    },
+}
+_engine_state: dict[str, dict] = {name: {"proc": None, "desc": ""} for name in ENGINES}
 
 
 def _load_or_create_secret_key() -> bytes:
@@ -138,8 +161,9 @@ def get_all_states() -> list[str]:
     return states
 
 
-def is_engine_running() -> bool:
-    return _engine_proc is not None and _engine_proc.poll() is None
+def is_engine_running(name: str) -> bool:
+    proc = _engine_state[name]["proc"]
+    return proc is not None and proc.poll() is None
 
 
 @app.route("/")
@@ -158,6 +182,10 @@ def dashboard():
     unknown_date_packets = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM packets WHERE reviewed = 1")
     reviewed_packets = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM packets WHERE review_method IS NULL")
+    unreviewed_ocr_packets = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM packets WHERE priority = 1")
+    priority_packets = cur.fetchone()[0]
 
     cur.execute(
         """
@@ -172,12 +200,25 @@ def dashboard():
         """
     )
     state_table = dict_rows(cur)
+
+    cur.execute("SELECT * FROM blocked_sources ORDER BY state, category")
+    blocked_sources = dict_rows(cur)
     conn.close()
 
-    log_tail = ""
-    if LOG_PATH.exists():
-        lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
-        log_tail = "\n".join(lines[-40:])
+    engines = {}
+    for name, cfg in ENGINES.items():
+        log_tail = ""
+        if cfg["log"].exists():
+            lines = cfg["log"].read_text(encoding="utf-8", errors="replace").splitlines()
+            log_tail = "\n".join(lines[-40:])
+        proc = _engine_state[name]["proc"]
+        engines[name] = {
+            "label": cfg["label"],
+            "running": is_engine_running(name),
+            "pid": proc.pid if proc else None,
+            "desc": _engine_state[name]["desc"],
+            "log_tail": log_tail,
+        }
 
     return render_template(
         "dashboard.html",
@@ -186,49 +227,113 @@ def dashboard():
         upcoming_packets=upcoming_packets,
         unknown_date_packets=unknown_date_packets,
         reviewed_packets=reviewed_packets,
+        unreviewed_ocr_packets=unreviewed_ocr_packets,
+        priority_packets=priority_packets,
         state_table=state_table,
         all_states=get_all_states(),
-        engine_running=is_engine_running(),
-        engine_pid=_engine_proc.pid if _engine_proc else None,
-        engine_state=_engine_desc,
-        log_tail=log_tail,
+        all_board_types=BOARD_KEYWORDS,
+        engines=engines,
+        blocked_sources=blocked_sources,
     )
 
 
-@app.route("/engine/start", methods=["POST"])
-def engine_start():
-    global _engine_proc, _engine_desc
-    if is_engine_running():
-        flash("Engine is already running.")
+@app.route("/engine/<name>/start", methods=["POST"])
+def engine_start(name: str):
+    if name not in ENGINES:
+        flash("Unknown engine.")
+        return redirect(url_for("dashboard"))
+    if is_engine_running(name):
+        flash(f"{ENGINES[name]['label']} is already running.")
         return redirect(url_for("dashboard"))
 
-    args = [sys.executable, str(Path(__file__).resolve().parent / "crawl_sites.py")]
-    state = request.form.get("state", "").strip()
-    limit = request.form.get("limit", "").strip()
-    recheck = request.form.get("recheck") == "1"
-    if state:
-        args += ["--state", state]
-    if limit:
-        args += ["--limit", limit]
-    if recheck:
-        args += ["--recheck"]
+    script_path = Path(__file__).resolve().parent / ENGINES[name]["script"]
+    args = [sys.executable, str(script_path)]
+    desc_parts = []
 
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    log_file = open(LOG_PATH, "w", encoding="utf-8")
-    _engine_proc = subprocess.Popen(args, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(BASE_DIR))
-    _engine_desc = (state or "all states") + (f", limit {limit}" if limit else "") + (", recheck" if recheck else "")
-    flash(f"Started crawl ({_engine_desc}).")
+    if name == "crawl":
+        state = request.form.get("state", "").strip()
+        limit = request.form.get("limit", "").strip()
+        recheck = request.form.get("recheck") == "1"
+        if state:
+            args += ["--state", state]
+            desc_parts.append(state)
+        if limit:
+            args += ["--limit", limit]
+            desc_parts.append(f"limit {limit}")
+        if recheck:
+            args += ["--recheck"]
+            desc_parts.append("recheck")
+    elif name == "review":
+        board_type = request.form.get("board_type", "").strip()
+        limit = request.form.get("limit", "").strip()
+        upcoming_only = request.form.get("upcoming_only") == "1"
+        rereview = request.form.get("rereview") == "1"
+        if board_type:
+            args += ["--board-type", board_type]
+            desc_parts.append(board_type)
+        if limit:
+            args += ["--limit", limit]
+            desc_parts.append(f"limit {limit}")
+        if upcoming_only:
+            args += ["--upcoming-only"]
+            desc_parts.append("upcoming only")
+        if rereview:
+            args += ["--rereview"]
+            desc_parts.append("re-review")
+
+    log_path = ENGINES[name]["log"]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, "w", encoding="utf-8")
+    proc = subprocess.Popen(args, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(BASE_DIR))
+    desc = ", ".join(desc_parts) or "default options"
+    _engine_state[name] = {"proc": proc, "desc": desc}
+    flash(f"Started {ENGINES[name]['label']} ({desc}).")
     return redirect(url_for("dashboard"))
 
 
-@app.route("/engine/stop", methods=["POST"])
-def engine_stop():
-    global _engine_proc
-    if is_engine_running():
-        _engine_proc.terminate()
-        flash("Engine stopped.")
+@app.route("/engine/<name>/stop", methods=["POST"])
+def engine_stop(name: str):
+    if name not in ENGINES:
+        flash("Unknown engine.")
+        return redirect(url_for("dashboard"))
+    if is_engine_running(name):
+        _engine_state[name]["proc"].terminate()
+        flash(f"{ENGINES[name]['label']} stopped.")
     else:
-        flash("Engine was not running.")
+        flash(f"{ENGINES[name]['label']} was not running.")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/blocked-sources/<int:source_id>/retry", methods=["POST"])
+def retry_blocked_source(source_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT url FROM blocked_sources WHERE id = ?", (source_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        flash("Source not found.")
+        return redirect(url_for("dashboard"))
+    url = row[0]
+
+    try:
+        resp = requests.get(url, headers=RETRY_HEADERS, timeout=15)
+        if resp.status_code == 200 and len(resp.text) > 500:
+            status = f"200 OK, {len(resp.text)} bytes — worth re-checking the parser by hand"
+        elif resp.status_code in (403, 429):
+            status = f"still blocked (HTTP {resp.status_code})"
+        else:
+            status = f"HTTP {resp.status_code}"
+    except requests.RequestException as e:
+        status = f"still unreachable ({type(e).__name__})"
+
+    cur.execute(
+        "UPDATE blocked_sources SET last_status = ?, last_checked_at = datetime('now') WHERE id = ?",
+        (status, source_id),
+    )
+    conn.commit()
+    conn.close()
+    flash(f"Retried {url} — {status}")
     return redirect(url_for("dashboard"))
 
 
@@ -303,6 +408,9 @@ def new_municipality():
 
 @app.route("/municipalities/<int:muni_id>")
 def municipality_detail(muni_id: int):
+    date_from = request.args.get("date_from", "")
+    date_to = request.args.get("date_to", "")
+
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT * FROM municipalities WHERE id = ?", (muni_id,))
@@ -313,14 +421,25 @@ def municipality_detail(muni_id: int):
         return redirect(url_for("municipalities"))
     m = m[0]
 
+    where = ["municipality_id = ?"]
+    params: list = [muni_id]
+    if date_from:
+        where.append("meeting_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("meeting_date <= ?")
+        params.append(date_to)
+
     cur.execute(
-        "SELECT * FROM packets WHERE municipality_id = ? ORDER BY meeting_date DESC",
-        (muni_id,),
+        f"SELECT * FROM packets WHERE {' AND '.join(where)} ORDER BY meeting_date DESC",
+        params,
     )
     packet_rows = dict_rows(cur)
     conn.close()
 
-    return render_template("municipality_detail.html", m=m, packets=packet_rows)
+    return render_template(
+        "municipality_detail.html", m=m, packets=packet_rows, date_from=date_from, date_to=date_to
+    )
 
 
 @app.route("/municipalities/<int:muni_id>/recheck", methods=["POST"])
@@ -360,6 +479,8 @@ def packets():
     board_type = request.args.get("board_type", "")
     priority_only = request.args.get("priority_only", "")
     within_days = request.args.get("within_days", "10")
+    date_from = request.args.get("date_from", "")
+    date_to = request.args.get("date_to", "")
     page = max(1, request.args.get("page", 1, type=int))
 
     where = []
@@ -390,6 +511,18 @@ def packets():
         params.append(board_type)
     if priority_only == "1":
         where.append("p.priority = 1")
+    # Explicit date range — independent of the "which"/within_days quick
+    # filters above, so e.g. "show me everything in September" is possible
+    # regardless of upcoming/unknown/all. Same NULL caveat as within_days:
+    # a packet with no parseable meeting_date can never match either bound,
+    # so combining a date range with which=unknown always returns nothing —
+    # that's correct SQL behavior, not a bug, just worth knowing.
+    if date_from:
+        where.append("p.meeting_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("p.meeting_date <= ?")
+        params.append(date_to)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     conn = get_connection()
@@ -427,7 +560,10 @@ def packets():
         which=which,
         reviewed=reviewed,
         board_type=board_type,
+        priority_only=priority_only,
         within_days=within_days,
+        date_from=date_from,
+        date_to=date_to,
         page=page,
         total=total,
         total_pages=total_pages,
@@ -442,6 +578,21 @@ def toggle_reviewed(packet_id: int):
     conn.close()
     next_url = request.form.get("next") or url_for("packets")
     return redirect(next_url)
+
+
+@app.route("/packets/<int:packet_id>/mark_reviewed", methods=["POST"])
+def mark_reviewed(packet_id: int):
+    """Fired by JS when a packet's link is clicked (see packets.html/
+    municipality_detail.html) — sets reviewed=1 outright rather than
+    toggling, so opening the same link twice can't accidentally flip it
+    back to unreviewed. Returns JSON (not a redirect) since this is called
+    via fetch(), not a form submit — the click itself still navigates
+    normally to the PDF in a new tab."""
+    conn = get_connection()
+    conn.execute("UPDATE packets SET reviewed = 1 WHERE id = ?", (packet_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 def main() -> None:

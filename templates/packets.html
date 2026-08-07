@@ -20,11 +20,21 @@
     <label class="muted" style="font-size:13px">within
       <input type="number" name="within_days" value="{{ within_days }}" min="0" style="width:60px" title="0 = no cap"> days
     </label>
+    <label class="muted" style="font-size:13px">from
+      <input type="date" name="date_from" value="{{ date_from }}">
+    </label>
+    <label class="muted" style="font-size:13px">to
+      <input type="date" name="date_to" value="{{ date_to }}">
+    </label>
     <select name="reviewed" onchange="this.form.submit()">
       <option value="" {{ 'selected' if reviewed == '' }}>Any review state</option>
       <option value="0" {{ 'selected' if reviewed == '0' }}>Unreviewed</option>
       <option value="1" {{ 'selected' if reviewed == '1' }}>Reviewed</option>
     </select>
+    <label class="muted" style="font-size:13px">
+      <input type="checkbox" name="priority_only" value="1" {{ 'checked' if priority_only == '1' }} onchange="this.form.submit()">
+      priority only (applicant+email found)
+    </label>
     <button type="submit">Filter</button>
     <span class="muted">{{ total }} result(s)</span>
   </form>
@@ -32,29 +42,57 @@
 
 <div class="card">
   <table>
-    <tr><th>Date</th><th>Municipality</th><th>Keyword</th><th>Title</th><th>Match</th><th>Reviewed</th><th></th></tr>
+    <tr><th>Date</th><th>Municipality</th><th>Keyword</th><th>Title</th><th>Match</th><th>Priority</th><th>Reviewed</th><th></th></tr>
     {% for p in rows %}
-    <tr>
+    <tr data-packet-row="{{ p.id }}" class="{{ 'reviewed' if p.reviewed }}">
       <td>{{ p.meeting_date or 'unknown' }}</td>
       <td><a href="{{ url_for('municipality_detail', muni_id=p.municipality_id) }}">{{ p.name }}, {{ p.state }}</a></td>
       <td class="muted">{{ p.board_type or '—' }}</td>
-      <td><a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.title|truncate(60) }}</a></td>
+      <td><a href="{{ p.url }}" target="_blank" rel="noopener" class="packet-link" data-packet-id="{{ p.id }}">{{ p.title|truncate(60) }}</a></td>
       <td class="muted">{{ p.match_reason }}</td>
-      <td>{{ 'yes' if p.reviewed else 'no' }}</td>
+      <td>
+        {% if p.priority %}
+          <span class="badge ok" title="{{ p.applicant_snippet or '' }}">priority</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td data-reviewed-cell="{{ p.id }}">{{ 'yes' if p.reviewed else 'no' }}</td>
       <td>
         <form method="post" action="{{ url_for('toggle_reviewed', packet_id=p.id) }}" class="inline">
           <input type="hidden" name="next" value="{{ request.full_path }}">
-          <button type="submit" class="secondary">{{ 'unmark' if p.reviewed else 'mark reviewed' }}</button>
+          <button type="submit" class="secondary" data-reviewed-btn="{{ p.id }}">{{ 'unmark' if p.reviewed else 'mark reviewed' }}</button>
         </form>
       </td>
     </tr>
     {% endfor %}
   </table>
   <div class="pagination">
-    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, within_days=within_days, page=page-1) }}">← prev</a>{% endif %}
+    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, within_days=within_days, date_from=date_from, date_to=date_to, page=page-1) }}">← prev</a>{% endif %}
     <span class="muted">page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, within_days=within_days, page=page+1) }}">next →</a>{% endif %}
+    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, within_days=within_days, date_from=date_from, date_to=date_to, page=page+1) }}">next →</a>{% endif %}
   </div>
 </div>
+
+<script>
+// Clicking a packet's link marks it reviewed automatically (matches the
+// original Chrome extension's behavior: opening a link auto-checks it).
+// The click still navigates normally (new tab, target="_blank") — this
+// just fires the mark-as-reviewed call alongside it and updates the row
+// in place, no page reload needed.
+document.querySelectorAll('.packet-link').forEach(function (link) {
+  link.addEventListener('click', function () {
+    var id = link.dataset.packetId;
+    fetch('/packets/' + id + '/mark_reviewed', { method: 'POST' }).then(function () {
+      var row = document.querySelector('[data-packet-row="' + id + '"]');
+      var cell = document.querySelector('[data-reviewed-cell="' + id + '"]');
+      var btn = document.querySelector('[data-reviewed-btn="' + id + '"]');
+      if (row) row.classList.add('reviewed');
+      if (cell) cell.textContent = 'yes';
+      if (btn) btn.textContent = 'unmark';
+    });
+  });
+});
+</script>
 
 {% endblock %}

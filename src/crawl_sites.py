@@ -59,6 +59,34 @@ from bs4 import BeautifulSoup
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from date_extract import extract_meeting_date, is_upcoming
 from db import get_connection
+from pdf_review import extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
+
+# License/permit-style categories only: for these, a packet is only kept
+# if the actual PDF names a specific applicant/owner AND a contact email —
+# that combination is the real signal of a genuine application (who
+# applied, how to reach them), which routine Planning/Zoning/Historic
+# meeting minutes and agendas legitimately never contain. Applying this to
+# every category was tested against 40 real saved packets first: 0/40
+# passed, since ordinary meeting records don't name an applicant's email —
+# confirming this must stay scoped to license categories, not universal.
+LICENSE_BOARD_TYPES = {
+    "Liquor License Board",
+    "Alcoholic Beverage Control Board",
+    "Board of License Commissioners",
+    "License Commission",
+}
+
+
+def passes_license_content_gate(url: str) -> bool:
+    pdf_bytes = fetch_pdf_bytes(url)
+    if pdf_bytes is None:
+        return False
+    text = extract_native_text(pdf_bytes)
+    if len(text.strip()) < 40:
+        return False  # no OCR fallback here — keep the main crawl fast; a
+        # scanned license PDF can still be caught later via review_packets.py
+    passes, _, _ = has_applicant_and_contact(text)
+    return passes
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

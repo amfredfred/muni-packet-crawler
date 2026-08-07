@@ -3,37 +3,75 @@
 {% block content %}
 
 <div class="card">
-  <h2 style="margin-top:0">Engine</h2>
+  <h2 style="margin-top:0">{{ engines.crawl.label }}</h2>
   <p>
     Status:
-    {% if engine_running %}
-      <span class="badge ok">running</span> (PID {{ engine_pid }}{% if engine_state %}, {{ engine_state }}{% endif %})
+    {% if engines.crawl.running %}
+      <span class="badge ok">running</span> (PID {{ engines.crawl.pid }}{% if engines.crawl.desc %}, {{ engines.crawl.desc }}{% endif %})
     {% else %}
       <span class="badge muted">stopped</span>
     {% endif %}
   </p>
-  <form method="post" action="{{ url_for('engine_start') }}" class="filters">
+
+  {% if engines.crawl.running %}
+  <form method="post" action="{{ url_for('engine_stop', name='crawl') }}" class="filters">
+    <span class="muted" style="font-size:13px">Running with: {{ engines.crawl.desc or 'default options' }}</span>
+    <button type="submit" class="danger">Stop crawl</button>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('engine_start', name='crawl') }}" class="filters">
     <select name="state">
       <option value="">All states</option>
       {% for s in all_states %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
     </select>
     <input type="number" name="limit" placeholder="limit (optional)" style="width:140px">
     <label class="muted" style="font-size:13px"><input type="checkbox" name="recheck" value="1"> re-check already-crawled</label>
-    {% if engine_running %}
-      <button type="submit" disabled title="stop the engine first">Start crawl</button>
-    {% else %}
-      <button type="submit">Start crawl</button>
-    {% endif %}
+    <button type="submit">Start crawl</button>
   </form>
-  {% if engine_running %}
-  <form method="post" action="{{ url_for('engine_stop') }}" style="margin-top:8px">
-    <button type="submit" class="danger">Stop crawl</button>
-  </form>
+  <p class="muted" style="font-size:12px; margin-top:6px">Leave "re-check" unchecked to only crawl municipalities never checked before — if everything's already been crawled, that finds nothing to do and exits immediately.</p>
   {% endif %}
-  {% if log_tail %}
-  <details style="margin-top:10px" {{ 'open' if engine_running }}>
+  {% if engines.crawl.log_tail %}
+  <details style="margin-top:10px" {{ 'open' if engines.crawl.running }}>
     <summary class="muted">log tail</summary>
-    <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ log_tail }}</pre>
+    <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ engines.crawl.log_tail }}</pre>
+  </details>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">{{ engines.review.label }}</h2>
+  <p class="muted" style="font-size:13px; margin-top:-6px">Downloads each packet's PDF, extracts its text (OCR fallback if Tesseract/Poppler are installed), and flags ones naming a specific applicant/owner as priority. This is what runs "the OCR" — there's no separate button for OCR alone, since native text extraction is tried first and OCR only kicks in when that fails.</p>
+  <p>
+    Status:
+    {% if engines.review.running %}
+      <span class="badge ok">running</span> (PID {{ engines.review.pid }}{% if engines.review.desc %}, {{ engines.review.desc }}{% endif %})
+    {% else %}
+      <span class="badge muted">stopped</span>
+    {% endif %}
+  </p>
+
+  {% if engines.review.running %}
+  <form method="post" action="{{ url_for('engine_stop', name='review') }}" class="filters">
+    <span class="muted" style="font-size:13px">Running with: {{ engines.review.desc or 'default options' }}</span>
+    <button type="submit" class="danger">Stop review</button>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('engine_start', name='review') }}" class="filters">
+    <select name="board_type">
+      <option value="">All keywords</option>
+      {% for k in all_board_types %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+    </select>
+    <input type="number" name="limit" placeholder="limit (optional)" style="width:140px">
+    <label class="muted" style="font-size:13px"><input type="checkbox" name="upcoming_only" value="1"> upcoming only</label>
+    <label class="muted" style="font-size:13px"><input type="checkbox" name="rereview" value="1"> re-review already-reviewed</label>
+    <button type="submit">Start review</button>
+  </form>
+  <p class="muted" style="font-size:12px; margin-top:6px">{{ unreviewed_ocr_packets }} packet(s) not yet reviewed. Leave "re-review" unchecked to only process those.</p>
+  {% endif %}
+  {% if engines.review.log_tail %}
+  <details style="margin-top:10px" {{ 'open' if engines.review.running }}>
+    <summary class="muted">log tail</summary>
+    <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ engines.review.log_tail }}</pre>
   </details>
   {% endif %}
 </div>
@@ -57,6 +95,7 @@
     <div class="stat"><div class="n">{{ upcoming_packets }}</div><div class="l">upcoming</div></div>
     <div class="stat"><div class="n">{{ unknown_date_packets }}</div><div class="l">unknown date</div></div>
     <div class="stat"><div class="n">{{ reviewed_packets }}</div><div class="l">reviewed</div></div>
+    <div class="stat"><div class="n">{{ priority_packets }}</div><div class="l">priority (applicant+email found)</div></div>
   </div>
   <p style="margin-top:12px"><a href="{{ url_for('packets') }}" class="btn secondary">Browse packets →</a></p>
 </div>
@@ -74,6 +113,29 @@
       <td>{{ row.no_agenda_found }}</td>
       <td>{{ row.error }}</td>
       <td>{{ row.unchecked }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Blocked/unavailable state sources</h2>
+  <p class="muted" style="font-size:13px; margin-top:-6px">Sources checked while researching state directories that were bot-blocked, dead, or otherwise not scrapable at the time — see the README for the full narrative. "Retry" re-fetches the URL right now and records the result; it doesn't build a scraper by itself, just tells you whether it's worth trying again.</p>
+  <table>
+    <tr><th>State</th><th>URL</th><th>Reason</th><th>Category</th><th>Last retried</th><th>Last result</th><th></th></tr>
+    {% for s in blocked_sources %}
+    <tr>
+      <td>{{ s.state }}</td>
+      <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(45) }}</a></td>
+      <td class="muted">{{ s.reason }}</td>
+      <td class="muted">{{ s.category }}</td>
+      <td class="muted">{{ s.last_checked_at or 'never' }}</td>
+      <td class="muted">{{ s.last_status }}</td>
+      <td>
+        <form method="post" action="{{ url_for('retry_blocked_source', source_id=s.id) }}" class="inline">
+          <button type="submit" class="secondary">Retry</button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
   </table>
