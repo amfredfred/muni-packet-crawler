@@ -175,38 +175,51 @@ unrelated to the crawler itself:
 
 ## State coverage
 
-Current total: **3,467 municipalities across 33 states.**
+Current total: **5,878 municipalities across 47 states.**
 
 | State | Source | Count | Notes |
 |---|---|---|---|
+| Iowa | `scrapers/iowa.py` | 537 | League's "Cities in Iowa" page renders its full member table server-side in one load; ~43% of rows have no website on file (a real gap), a few more have a doubled scheme (`http://https://...`) fixed rather than dropped |
 | Michigan | `scrapers/michigan.py` | 485 | 26 letter-pages, "Full Member" filter |
 | California | `scrapers/california.py` | 466 | static HTML |
+| North Carolina | `scrapers/north_carolina.py` | 457 | UNC School of Government's public "N.C. Cities and Towns" reference table (city/chamber/county columns — only the first is kept) |
 | Georgia | `scrapers/georgia.py` | 412 | two-step: the visible "Load More" button does nothing but reveal more of an array that's already fully present — the whole 536-city dataset (name, FIPS code, address, phone) is embedded server-side in the page's initial Next.js RSC payload. Official website is only on each city's own detail page (plain `requests`, no clicking); 125 of 536 have no website listed at all, a genuine gap in GMA's own data |
 | Massachusetts | `scrapers/massachusetts.py` | 352 | official mass.gov list (state gov, not a league); headless browser (site blocks plain requests) |
 | Kansas | `scrapers/kansas.py` | 298 | static HTML |
+| Maine | `scrapers/maine.py` | 294 | Maine's own league gates its directory behind login; a University of Maine School of Law LibGuide (16 county pages, one town per ordinances link) covers 294 of ~486 towns instead — third-party ordinance hosts (Municode etc.) are filtered out since that's not the town's own site |
 | Alabama | `scrapers/alabama.py` | 235 | two-step: Atlas Alabama's directory links to per-municipality profile pages, each with a labeled "City Website"/"Town Website" button (Alabama classifies municipalities as either — matching only one form silently skipped every instance of the other on the first pass) |
 | Colorado | `scrapers/colorado.py` | 215 | static HTML |
 | Virginia | `scrapers/virginia.py` | 204 | cities+towns+counties, archived static page |
+| Arkansas | `scrapers/arkansas.py` | 199 | wpDataTables AJAX endpoint on the member directory needed a full 17-column DataTables payload replayed (captured via Playwright), not just draw/start/length; 6,396 official-level rows collapse to 500 cities, 199 with a website on file |
 | South Carolina | `scrapers/south_carolina.py` | 198 | two-step (list page → per-city filtered page → profile page); ~73 members have no listed site |
+| Idaho | `scrapers/idaho.py` | 163 | AIC's member-search directory is login-gated, but its public "Cities in Idaho" page isn't — 163 of ~200 cities have a link there |
+| Maryland | `scrapers/maryland.py` | 151 | MML's "Member Cities and Towns" page is a clean static list, no login/AJAX needed |
 | Nebraska | `scrapers/nebraska.py` | 144 | official nebraska.gov attractions page, static accordion panel |
+| Kentucky | `scrapers/kentucky.py` | 139 | KLC has no public city directory at all; the state DLG's per-city profile system (`City_ID` 1-495) states one contact email per city, and that email's domain is usually the city's own — verified live and content-checked (see `_domain_verify.py`) rather than trusted on domain name alone, after a first pass let ISPs/phone co-ops through |
+| Vermont | `scrapers/vermont.py` | 132 | VLCT's directory is login-gated and the Secretary of State's main site is WAF-blocked, but the SOS's town clerk guide PDF (a different subdomain) isn't; same email-domain-inference-and-verify approach as Kentucky |
+| South Dakota | `scrapers/south_dakota.py` | 124 | League's "Find a Municipality" search (unlike "Find an Individual") isn't login-gated; results grid is an iframe hitting an ASP.NET search endpoint directly, paginated via `__doPostBack`, each profile has a plain "Visit Website" link |
 | West Virginia | `scrapers/west_virginia.py` | 92 | ~137 members have no site (Wikipedia link only, skipped) |
 | Arizona | `scrapers/arizona.py` | 83 | WP Business Directory plugin, paginated client-side; headless browser clicks through all pages |
 | New Mexico | `scrapers/new_mexico.py` | 83 | static HTML |
+| Montana | `scrapers/montana.py` | 81 | League directory's per-municipality profile states a "Website:" field directly, no login needed; a second top-level navigation in the same browser context reliably tripped a Cloudflare interstitial, fixed with a fresh context per profile |
 | Minnesota | `scrapers/minnesota.py` | 57 | mn.gov's directory sits behind Radware Bot Manager, but that block only triggers on a *headless* fingerprint — a real (non-headless) browser session passes through with no CAPTCHA at all. Of ~850 listed cities, only 57 have an actual website link (the rest are unlinked plain text, a real gap in the state's own data); captured as a static snapshot since re-running requires a real browser session, not a re-runnable headless script |
+| Delaware | `scrapers/delaware.py` | 51 | the Delaware League of Local Governments' membership-directory page (a different domain from the two earlier dead ends tried) is a clean static list; 3 counties/levy-courts filtered out by name |
+| Wyoming | `scrapers/wyoming.py` | 41 | WAM's directory page itself has no website field, but its downloadable "2026 Municipal Directory" PDF states one directly for 41 of 99 towns |
 | Rhode Island | `scrapers/rhode_island.py` | 40 | two-step: each row's `onclick` handler resolves to a plain `GET .../GOVDirectoryMeetingDetails?EntityID=N` with no JS execution needed; includes the Narragansett Indian Tribe alongside cities/towns |
+| Mississippi | `scrapers/mississippi.py` | 38 | MML's directory (list + per-city profile) has no website or email field at all; the Secretary of State's Blue Book PDF lists a contact email per city instead, same domain-inference-and-verify approach as Kentucky |
+| Hawaii | `scrapers/hawaii.py` | 4 | Hawaii has no incorporated cities/towns at all — local government is done entirely by the four county governments (Honolulu is consolidated city-county); those are indexed as `place_type='county'`, matching how Virginia/Georgia already store county-level and consolidated entries |
 | Nevada | `scrapers/nevada.py` | 19 | small state; includes General Improvement Districts |
-| (remaining ~19 states) | `build_index.py` (Wikidata) | ~1-23 each | major cities only, sparse — P856 rarely set for small municipalities |
+| (remaining states) | `build_index.py` (Wikidata) | ~1-23 each | major cities only, sparse — P856 rarely set for small municipalities |
 
 ### Checked and ruled out (with reason)
 
-- **Hard bot-block, even with headless Chromium** (Cloudflare/nginx-level, would need stealth plugin or residential proxy — out of scope here): Florida, Indiana, Wisconsin, Kentucky.
+- **Hard bot-block, even with headless Chromium** (Cloudflare/nginx-level, would need stealth plugin or residential proxy — out of scope here): Florida, Indiana, Wisconsin.
 - **Site outage at check time, not a block** (worth retrying later): Missouri.
 - **Content genuinely no longer exists at the flagged URL**: Ohio's `omlohio.org` QuickLinks category that used to list cities/villages has been removed/reorganized (now returns "There are no Quick Links for this selection"). The closest replacement found via the site's own search is a members-only PDF roster — names only, no website URLs or link annotations, so it can't populate `official_url`.
-- **Directory exists but doesn't expose an official government website field** (only meeting schedule/contact info): Mississippi, Wyoming.
-- **Dead/unreachable domain** at check time (confirmed with both plain `requests` and headless Chromium — genuine connectivity issue, not a bot-block): Montana (`legacy.mtleague.org`), North Dakota (`nd.gov` — notable since this was otherwise the best-named lead, a page literally titled "City Website List"), Delaware (`dllg.delaware.gov`, a second attempt after the original `ipa.udel.edu` source proved too messy to parse — also fails DNS resolution).
-- **Membership-gated** (directory requires login): Idaho.
-- **No free public directory found at all** (paid/printed directory only, or only a general state-facts page with no city-level list): Illinois, New Jersey, Pennsylvania, Iowa, Tennessee, Oregon (PDF only), Texas, North Carolina, Louisiana, Maryland, Oklahoma, South Dakota, Utah, Connecticut, Maine (state portal is a per-town search tool, not a flat list), New Hampshire, Vermont, Arkansas.
-- **No sub-county municipal government exists** (nothing to index): Hawaii (only 5 counties; Honolulu is consolidated city-county).
+- **Directory exists but doesn't expose an official government website field anywhere** (checked the member list, per-city profile pages, and raw HTML for hidden links): Louisiana.
+- **League directory is CAPTCHA-walled** (won't attempt to bypass), and the one alternate source with clean structured data (a third-party city-directory site with schema.org markup) is impractically slow — 30-100+ seconds per request across ~350 cities: North Dakota.
+- **Directory is a person/official search tool, not a city index** (no per-city website field anywhere in it); the state's own official municipality contact list has names only, no email or website: Oklahoma.
+- **No free public directory found at all** (paid/printed directory only, or only a general state-facts page with no city-level list): Illinois, New Jersey, Pennsylvania, Tennessee, Oregon (PDF only), Texas, Utah, Connecticut, New Hampshire.
 - **Two-step, not yet built**: Alaska (per-municipality PDF profile sheets on akml.org — would need PDF parsing, ~165 municipalities).
 
 ### Adding a new state
@@ -218,6 +231,14 @@ member/city directory page with a browser-like `User-Agent` (fall back to
 the specific wrapping tag/class, not a bare `<a href>` — a loose pattern
 will pick up nav/footer links as fake municipalities), and upsert into
 `municipalities` keyed on `(state, name)`.
+
+If the league directory has no website field at all, check whether it (or
+a state agency's directory/PDF) at least lists a contact email per
+municipality — the email's domain is often the city's own. Don't trust
+that inference on domain-liveness alone: reuse `scrapers/_domain_verify.py`,
+which also checks that the page's title actually names the city and vetoes
+obvious non-government domains (ISPs, phone co-ops, utilities), after an
+earlier version let a few of those through.
 
 ## Security notes
 
