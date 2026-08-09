@@ -3,10 +3,8 @@ Exports the genuinely static, safe-to-ship part of muni.db — municipalities,
 meetings, packets, blocked_sources — into a separate committed file,
 data/muni_seed.db. This is what a fresh deployment (e.g. a VPS) should
 start from, rather than copying muni.db itself: muni.db also holds the
-live TOTP secret (auth_totp, once 2FA setup completes) and real business/
-payment details (business_profile, invoices, once the invoicing feature
-is used), neither of which should ever be shared between deployments or
-committed to git.
+live TOTP secret (auth_totp, once 2FA setup completes), which should never
+be shared between deployments or committed to git.
 
 Re-run this after any crawl/review pass to refresh the committed seed
 with the latest scraped data.

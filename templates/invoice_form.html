@@ -1,57 +1,79 @@
 {% extends "base.html" %}
-{% block title %}New Invoice — Muni Packet Crawler{% endblock %}
+{% block title %}Invoices — Muni Packet Crawler{% endblock %}
 {% block content %}
 
-<style>main { max-width: 98vw; }</style>
+<div class="card">
+  <div class="tabs">
+    <button type="button" class="tab-btn active" data-tab="create">Create Invoice</button>
+    <button type="button" class="tab-btn" data-tab="howto">How to use it</button>
+  </div>
 
-<h2 style="margin-top:0">New invoice</h2>
-
-<div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap">
-  <div class="card" style="flex:1; min-width:380px">
+  <div class="tab-panel" data-panel="create">
     <p class="muted" style="font-size:13px; margin-top:0">
-      Every field the invoice uses is in this one JSON object — edit it directly.
-      FROM fields are pre-filled from your <a href="{{ url_for('business_profile') }}">business profile</a>.
+      Every field the invoice uses is in this one JSON object — edit it directly, or paste a full one from the
+      <a href="#" onclick="showTab('howto'); return false;">How to use it</a> tab. Nothing here is saved anywhere —
+      fill it in, preview it, and download the PDF.
       <code>items</code> is a list of <code>{"description": "...", "amount": 0}</code> objects — the invoice's
       total is always the sum of these, never a number set separately.
     </p>
 
-    <form method="post" id="invoice-form" enctype="multipart/form-data">
-      <textarea name="invoice_json" id="json-input" rows="20"
-        style="width:100%; font-family:ui-monospace,Consolas,monospace; font-size:13px; line-height:1.5"
-        oninput="onJsonChanged()">{{ default_json }}</textarea>
-      <p id="json-status" style="font-size:13px; min-height:18px"></p>
+    <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap">
+      <div style="flex:1; min-width:380px">
+        <textarea name="invoice_json" id="json-input" rows="20"
+          style="width:100%; font-family:ui-monospace,Consolas,monospace; font-size:13px; line-height:1.5"
+          oninput="onJsonChanged()">{{ default_json }}</textarea>
+        <p id="json-status" style="font-size:13px; min-height:18px"></p>
 
-      <div class="filters">
-        <label style="font-size:13px">Theme color<br>
-          <input type="color" id="theme-color-picker" onchange="onColorPickerChanged()">
-        </label>
-        <select id="commission-type-select">
-          <option value="">— Insert items from a commission type —</option>
-          {% for ct in commission_types %}<option value="{{ ct.id }}">{{ ct.name }}</option>{% endfor %}
-        </select>
-        <input type="number" step="0.01" id="base-amount-input" placeholder="base amount" style="width:140px">
-        <button type="button" class="secondary" onclick="insertFromCommissionType()">Insert</button>
+        <div class="filters">
+          <label style="font-size:13px">Theme color<br>
+            <input type="color" id="theme-color-picker" onchange="onColorPickerChanged()">
+          </label>
+        </div>
+
+        <p>
+          <label>Logo for this invoice (optional)<br><input type="file" name="logo" id="logo-input" accept="image/*" onchange="onJsonChanged()"></label>
+        </p>
+        <p class="muted" style="font-size:12px; margin-top:-8px">
+          Shown centered above "INVOICE" and as a faint watermark, fitted to a fixed size automatically.
+        </p>
+
+        <button type="button" id="submit-btn" onclick="downloadPdf()">Download PDF</button>
+        <span id="download-status" class="muted" style="font-size:13px"></span>
       </div>
 
-      <p>
-        <label>Logo for this invoice (optional)<br><input type="file" name="logo" id="logo-input" accept="image/*" onchange="onJsonChanged()"></label>
-      </p>
-      <p class="muted" style="font-size:12px; margin-top:-8px">
-        Falls back to your business profile's logo if left blank. Shown centered above "INVOICE" and as a
-        faint watermark, fitted to a fixed size automatically.
-      </p>
-
-      <button type="submit" id="submit-btn">Create invoice</button>
-      <a href="{{ url_for('invoices') }}" class="btn secondary">Cancel</a>
-    </form>
+      <div class="card" style="flex:1; min-width:380px; padding:0; overflow:hidden; margin-bottom:0">
+        <div style="padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center">
+          <strong style="font-size:13px">Live preview</strong>
+          <span id="preview-status" class="muted" style="font-size:12px"></span>
+        </div>
+        <iframe id="preview-frame" style="width:100%; height:80vh; border:none; background:white"></iframe>
+      </div>
+    </div>
   </div>
 
-  <div class="card" style="flex:1; min-width:380px; padding:0; overflow:hidden">
-    <div style="padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center">
-      <strong style="font-size:13px">Live preview</strong>
-      <span id="preview-status" class="muted" style="font-size:12px"></span>
-    </div>
-    <iframe id="preview-frame" style="width:100%; height:88vh; border:none; background:white"></iframe>
+  <div class="tab-panel" data-panel="howto" hidden>
+    <p class="muted" style="font-size:13px; margin-top:0">
+      The whole invoice is one JSON object. Paste a full one below into the box, hit "Load this example", tweak
+      the values on the Create tab, and download — or just edit the JSON directly from scratch.
+    </p>
+
+    <h3 style="margin-bottom:6px">Fields</h3>
+    <table>
+      <tr><th>Field</th><th>Meaning</th></tr>
+      <tr><td><code>invoice_number</code></td><td>Free text, shown as-is. Leave the pre-filled suggestion or type your own — nothing checks it for uniqueness.</td></tr>
+      <tr><td><code>from_name</code>, <code>from_address</code>, <code>from_phone</code>, <code>from_email</code></td><td>Your side of the letterhead. Any can be left blank.</td></tr>
+      <tr><td><code>to_name</code>, <code>to_address</code>, <code>to_phone</code>, <code>to_email</code></td><td>The client's side.</td></tr>
+      <tr><td><code>invoice_date</code>, <code>due_date</code></td><td><code>YYYY-MM-DD</code>. <code>due_date</code> shows "—" if blank.</td></tr>
+      <tr><td><code>payment_method</code></td><td>Free text, e.g. "Bank transfer" or "Check".</td></tr>
+      <tr><td><code>theme_color</code></td><td>Hex color (e.g. <code>#2955a3</code>) for the accent bar/table header — also settable via the color picker on the Create tab.</td></tr>
+      <tr><td><code>account_details</code></td><td>Free text (bank/account/routing, PayPal handle, etc). Only printed if non-empty.</td></tr>
+      <tr><td><code>notes</code></td><td>Free text, printed at the bottom if non-empty.</td></tr>
+      <tr><td><code>items</code></td><td>List of <code>{"description": "...", "amount": 0}</code>. The total is always the sum of these.</td></tr>
+    </table>
+
+    <h3 style="margin-bottom:6px">Full example</h3>
+    <pre id="example-json" style="background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:14px; font-size:12px; overflow:auto; max-height:420px">{{ example_json }}</pre>
+    <button type="button" onclick="loadExample()">Load this example into Create Invoice</button>
   </div>
 </div>
 
@@ -60,6 +82,25 @@ var previewUrl = null;
 var previewTimer = null;
 
 var HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+function showTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(function (b) {
+    b.classList.toggle('active', b.dataset.tab === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(function (p) {
+    p.hidden = p.dataset.panel !== name;
+  });
+}
+
+document.querySelectorAll('.tab-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () { showTab(btn.dataset.tab); });
+});
+
+function loadExample() {
+  document.getElementById('json-input').value = document.getElementById('example-json').textContent;
+  showTab('create');
+  onJsonChanged();
+}
 
 function onJsonChanged() {
   var status = document.getElementById('json-status');
@@ -124,25 +165,62 @@ function refreshPreview() {
     });
 }
 
-function insertFromCommissionType() {
-  var typeId = document.getElementById('commission-type-select').value;
-  var baseAmount = document.getElementById('base-amount-input').value || 0;
-  if (!typeId) { alert('Pick a commission type first.'); return; }
-  var textarea = document.getElementById('json-input');
-  var current;
+function buildFormData() {
+  var formData = new FormData();
+  formData.append('invoice_json', document.getElementById('json-input').value);
+  var logoFile = document.getElementById('logo-input').files[0];
+  if (logoFile) formData.append('logo', logoFile);
+  return formData;
+}
+
+async function downloadPdf() {
+  var status = document.getElementById('download-status');
+  status.textContent = 'generating…';
+  var resp;
   try {
-    current = JSON.parse(textarea.value);
+    resp = await fetch('{{ url_for("invoices") }}', { method: 'POST', body: buildFormData() });
   } catch (e) {
-    alert('Fix the JSON syntax error before inserting items.');
+    status.textContent = 'failed to reach server';
     return;
   }
-  fetch('/commission-types/' + typeId + '/compute?base_amount=' + encodeURIComponent(baseAmount))
-    .then(function (r) { return r.json(); })
-    .then(function (data) {
-      current.items = data.items;
-      textarea.value = JSON.stringify(current, null, 2);
-      onJsonChanged();
-    });
+  if (!resp.ok) {
+    var message = 'failed to generate invoice';
+    try { message = (await resp.json()).error || message; } catch (e) {}
+    status.textContent = message;
+    return;
+  }
+  var blob = await resp.blob();
+
+  // File System Access API (Chromium browsers): a real native "Save As"
+  // dialog, letting the user pick location and filename. Not supported
+  // everywhere (Firefox/Safari), so falls back to a plain triggered
+  // download there — that still saves the file, just without the picker.
+  if (window.showSaveFilePicker) {
+    try {
+      var handle = await window.showSaveFilePicker({
+        suggestedName: 'INVOICE.pdf',
+        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+      var writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      status.textContent = 'saved';
+    } catch (e) {
+      // AbortError means the user cancelled the picker — not a failure.
+      status.textContent = (e.name === 'AbortError') ? '' : 'failed to save file';
+    }
+    return;
+  }
+
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'INVOICE.pdf';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  status.textContent = 'downloaded';
 }
 
 onJsonChanged();

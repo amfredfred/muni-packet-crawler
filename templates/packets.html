@@ -2,41 +2,52 @@
 {% block title %}Packets — Muni Packet Crawler{% endblock %}
 {% block content %}
 
-<div class="card">
-  <form class="filters" method="get">
-    <select name="state" onchange="this.form.submit()">
-      <option value="">All states</option>
-      {% for s in all_states %}<option value="{{ s }}" {{ 'selected' if s == state }}>{{ s }}</option>{% endfor %}
-    </select>
-    <select name="board_type" onchange="this.form.submit()">
-      <option value="">All keywords</option>
-      {% for k in all_board_types %}<option value="{{ k }}" {{ 'selected' if k == board_type }}>{{ k }}</option>{% endfor %}
-    </select>
-    <select name="which" onchange="this.form.submit()">
-      <option value="upcoming" {{ 'selected' if which == 'upcoming' }}>Upcoming only</option>
-      <option value="unknown" {{ 'selected' if which == 'unknown' }}>Unknown date</option>
-      <option value="all" {{ 'selected' if which == 'all' }}>All (upcoming + unknown)</option>
-    </select>
-    <label class="muted" style="font-size:13px">within
-      <input type="number" name="within_days" value="{{ within_days }}" min="0" style="width:60px" title="0 = no cap"> days
+<div class="filter-layout">
+
+<div class="card filter-sidebar">
+  <h2 style="margin-top:0; font-size:14px">Filters</h2>
+  <form class="filters-vertical" method="get">
+    <label class="field">State
+      <select name="state" onchange="this.form.submit()">
+        <option value="">All states</option>
+        {% for s in all_states %}<option value="{{ s }}" {{ 'selected' if s == state }}>{{ s }}</option>{% endfor %}
+      </select>
     </label>
-    <label class="muted" style="font-size:13px">from
+    <label class="field">Keyword
+      <select name="board_type" onchange="this.form.submit()">
+        <option value="">All keywords</option>
+        {% for k in all_board_types %}<option value="{{ k }}" {{ 'selected' if k == board_type }}>{{ k }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">Date range
+      <select name="which" onchange="this.form.submit()">
+        <option value="upcoming" {{ 'selected' if which == 'upcoming' }}>Upcoming only</option>
+        <option value="unknown" {{ 'selected' if which == 'unknown' }}>Unknown date</option>
+        <option value="all" {{ 'selected' if which == 'all' }}>All (upcoming + unknown)</option>
+      </select>
+    </label>
+    <label class="field">Within days (0 = no cap)
+      <input type="number" name="within_days" value="{{ within_days }}" min="0" title="0 = no cap">
+    </label>
+    <label class="field">From
       <input type="date" name="date_from" value="{{ date_from }}">
     </label>
-    <label class="muted" style="font-size:13px">to
+    <label class="field">To
       <input type="date" name="date_to" value="{{ date_to }}">
     </label>
-    <select name="reviewed" onchange="this.form.submit()">
-      <option value="" {{ 'selected' if reviewed == '' }}>Any review state</option>
-      <option value="0" {{ 'selected' if reviewed == '0' }}>Unreviewed</option>
-      <option value="1" {{ 'selected' if reviewed == '1' }}>Reviewed</option>
-    </select>
-    <label class="muted" style="font-size:13px">
+    <label class="field">Review state
+      <select name="reviewed" onchange="this.form.submit()">
+        <option value="" {{ 'selected' if reviewed == '' }}>Any review state</option>
+        <option value="0" {{ 'selected' if reviewed == '0' }}>Unreviewed</option>
+        <option value="1" {{ 'selected' if reviewed == '1' }}>Reviewed</option>
+      </select>
+    </label>
+    <label class="field check-field">
       <input type="checkbox" name="priority_only" value="1" {{ 'checked' if priority_only == '1' }} onchange="this.form.submit()">
       priority only (applicant+email found)
     </label>
     <button type="submit">Filter</button>
-    <span class="muted">{{ total }} result(s)</span>
+    <span class="muted" style="font-size:13px">{{ total }} result(s)</span>
   </form>
 </div>
 
@@ -72,6 +83,8 @@
     <span class="muted">page {{ page }} of {{ total_pages }}</span>
     {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, within_days=within_days, date_from=date_from, date_to=date_to, page=page+1) }}">next →</a>{% endif %}
   </div>
+</div>
+
 </div>
 
 <script>

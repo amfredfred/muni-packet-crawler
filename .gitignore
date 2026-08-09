@@ -4,13 +4,11 @@ venv/
 *.egg-info/
 
 # muni.db itself is never committed: once 2FA setup completes it also
-# holds the live TOTP secret in auth_totp, and once the invoicing feature
-# is used it holds real business/payment details (business_profile,
-# invoices). The genuinely static, safe-to-ship part — municipalities,
-# meetings, packets, blocked_sources — gets exported into the separately
-# committed data/muni_seed.db via src/export_seed_db.py instead; a fresh
-# deployment copies that in as its starting muni.db and grows its own
-# live secrets from there.
+# holds the live TOTP secret in auth_totp. The genuinely static,
+# safe-to-ship part — municipalities, meetings, packets, blocked_sources —
+# gets exported into the separately committed data/muni_seed.db via
+# src/export_seed_db.py instead; a fresh deployment copies that in as its
+# starting muni.db and grows its own live secrets from there.
 data/muni.db
 data/muni.db-wal
 data/muni.db-shm
@@ -22,6 +20,5 @@ data/.flask_secret_key
 # Runtime logs, not source.
 data/*.log
 
-# Uploaded business logo — per-deployment branding, not source.
-data/logo.png
-data/logo_watermark.png
+# Real generated invoices (personal/business documents), not source.
+data/invoice_backups/

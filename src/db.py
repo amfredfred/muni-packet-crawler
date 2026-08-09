@@ -11,8 +11,7 @@ DATA_DIR = DB_PATH.parent
 
 # A fresh deployment (e.g. a VPS clone) has no muni.db yet — only the
 # committed snapshot of the static tables (see export_seed_db.py). muni.db
-# itself is never committed since it also holds the live TOTP secret and
-# real business/invoice data once those features are used.
+# itself is never committed since it also holds the live TOTP secret.
 SEED_DB_PATH = DATA_DIR / "muni_seed.db"
 
 
@@ -100,75 +99,6 @@ CREATE TABLE IF NOT EXISTS blocked_sources (
     UNIQUE(state, url)
 );
 
--- Single-row table (same CHECK(id=1) pattern as auth_totp): your business's
--- own letterhead info, defaulted into new invoices' FROM block but not
--- required — every field is nullable and editable per invoice.
-CREATE TABLE IF NOT EXISTS business_profile (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    name TEXT,
-    address TEXT,
-    phone TEXT,
-    email TEXT,
-    account_details TEXT,
-    theme_color TEXT,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
--- A named fee/commission structure (e.g. "Buyer's Agent Commission",
--- "Referral Fee") made of one or more line-item rules. Selecting a
--- commission type on a new invoice auto-populates invoice_items by
--- evaluating each rule against the invoice's base_amount — but the
--- result is just a starting point; invoice_items are editable afterward
--- and the invoice's real total is always the sum of its own line items,
--- never a number decided in advance and back-filled into items.
-CREATE TABLE IF NOT EXISTS commission_types (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS commission_type_items (
-    id INTEGER PRIMARY KEY,
-    commission_type_id INTEGER NOT NULL REFERENCES commission_types(id),
-    description TEXT NOT NULL,
-    calc_type TEXT NOT NULL CHECK (calc_type IN ('percentage', 'fixed')),
-    value REAL NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS invoices (
-    id INTEGER PRIMARY KEY,
-    invoice_number TEXT NOT NULL UNIQUE,
-    invoice_date TEXT NOT NULL,
-    due_date TEXT,
-    payment_method TEXT,
-    from_name TEXT,
-    from_address TEXT,
-    from_phone TEXT,
-    from_email TEXT,
-    to_name TEXT,
-    to_address TEXT,
-    to_phone TEXT,
-    to_email TEXT,
-    commission_type_id INTEGER REFERENCES commission_types(id),
-    base_amount REAL,
-    notes TEXT,
-    account_details TEXT,
-    theme_color TEXT,
-    logo_image BLOB,
-    logo_watermark BLOB,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS invoice_items (
-    id INTEGER PRIMARY KEY,
-    invoice_id INTEGER NOT NULL REFERENCES invoices(id),
-    description TEXT NOT NULL,
-    amount REAL NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0
-);
 """
 
 # Added after the initial schema — kept as migrations rather than folded into
@@ -191,12 +121,6 @@ MIGRATIONS = [
     ("packets", "review_method", "ALTER TABLE packets ADD COLUMN review_method TEXT"),
     ("packets", "applicant_snippet", "ALTER TABLE packets ADD COLUMN applicant_snippet TEXT"),
     ("packets", "priority", "ALTER TABLE packets ADD COLUMN priority INTEGER DEFAULT 0"),
-    ("business_profile", "account_details", "ALTER TABLE business_profile ADD COLUMN account_details TEXT"),
-    ("invoices", "account_details", "ALTER TABLE invoices ADD COLUMN account_details TEXT"),
-    ("business_profile", "theme_color", "ALTER TABLE business_profile ADD COLUMN theme_color TEXT"),
-    ("invoices", "theme_color", "ALTER TABLE invoices ADD COLUMN theme_color TEXT"),
-    ("invoices", "logo_image", "ALTER TABLE invoices ADD COLUMN logo_image BLOB"),
-    ("invoices", "logo_watermark", "ALTER TABLE invoices ADD COLUMN logo_watermark BLOB"),
 ]
 
 

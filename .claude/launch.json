@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "muni-webapp",
+      "runtimeExecutable": "venv/Scripts/python.exe",
+      "runtimeArgs": ["src/webapp.py"],
+      "port": 5000
+    }
+  ]
+}

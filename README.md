@@ -153,25 +153,23 @@ systemd-based setup script, ready to run once access is available.
 
 ## Invoice generator
 
-A general-purpose business invoice tool sharing the same webapp/database,
-unrelated to the crawler itself:
+A general-purpose business invoice tool sharing the same webapp, unrelated
+to the crawler itself and with no database table of its own — an invoice
+exists only as the PDF it renders to, nothing is ever saved server-side.
 
-- **Business profile** (`/business-profile`) — default letterhead (name,
-  address, phone, email, payment/account details, theme color, logo),
-  overridable per invoice.
-- **Commission types** (`/commission-types`) — reusable fee templates. Each
-  has any number of line-item rules (percentage-of-base or fixed fee)
-  evaluated against a base amount to produce a starting set of line items —
-  never the invoice's final total, which is always the live sum of its own
-  (freely editable) line items.
-- **Invoices** (`/invoices`) — a single JSON textarea is the entire editing
-  surface (pre-filled with sensible defaults/current values), plus a live
-  preview pane showing the actual generated PDF, refreshing as you type.
-  `invoice_number` is part of the JSON and overridable — leave it blank to
-  auto-generate (new) or keep the current one (editing). Per-invoice logo
-  upload falls back to the business profile's logo when not set. PDF
-  rendering via reportlab: fitted header logo, faint background watermark,
-  configurable accent color.
+- **Invoices** (`/invoices`) — two tabs: "Create Invoice" (a single JSON
+  textarea is the entire editing surface, plus a live preview pane showing
+  the actual generated PDF, refreshing as you type) and "How to use it"
+  (a field reference and a full copy-pasteable example JSON — load it,
+  tweak the values, download). `invoice_number` is part of the JSON and
+  freely editable; nothing checks it for uniqueness since there's nothing
+  to check it against. The logo is uploaded fresh per invoice (no saved
+  default to fall back to). Submitting downloads the PDF directly
+  (`Content-Disposition: attachment`) — there's no list of past invoices
+  and no edit-an-existing-invoice flow; re-generate from the same JSON
+  (kept wherever you want — your own notes, a saved file) whenever it's
+  needed again. PDF rendering via reportlab: fitted header logo, faint
+  background watermark, configurable accent color.
 
 ## State coverage
 

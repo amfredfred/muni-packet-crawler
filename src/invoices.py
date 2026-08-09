@@ -1,22 +1,23 @@
 """
-Business invoice generation: commission-type fee templates, invoice/line-item
-storage, and PDF rendering.
+Business invoice generation: parses a single JSON blob (fields + line
+items) into a PDF. Nothing here is persisted anywhere — an invoice exists
+only as the PDF it renders to; there's no database table, no history, no
+edit-an-existing-invoice flow. Re-generate it from the same JSON (kept
+wherever the user wants — their own notes, a saved file) if it's needed
+again.
 
 Design principle: totals are always computed forward, never back-filled.
-A commission type's line items are *rules* (percentage-of-base or a fixed
-fee) applied to a base amount to produce a starting set of invoice_items;
-after that, an invoice's subtotal/total is simply the sum of its own
-invoice_items rows. Nothing here ever takes a target total and manufactures
-line items to match it — if you want a different total, you edit the real
-line items, and the total follows.
+An invoice's subtotal/total is simply the sum of its own line items —
+nothing here ever takes a target total and manufactures line items to
+match it. If you want a different total, you edit the real line items,
+and the total follows.
 """
 
 import io
 import json
 import re
-import sqlite3
+import secrets
 from datetime import date
-from pathlib import Path
 
 from PIL import Image as PILImage
 from reportlab.lib import colors
@@ -32,9 +33,6 @@ MUTED = colors.HexColor("#666666")
 LIGHT_BG = colors.HexColor("#f2f4f7")
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-LOGO_PATH = DATA_DIR / "logo.png"
-LOGO_WATERMARK_PATH = DATA_DIR / "logo_watermark.png"
 LOGO_MAX_DIMENSION = 800  # px, for the stored full-opacity copy
 LOGO_BOX = (2.8 * inch, 1.4 * inch)  # fixed-size box the header logo is fitted into
 WATERMARK_ALPHA = 0.09  # faint background mark, not meant to compete with real content
@@ -43,12 +41,11 @@ WATERMARK_WIDTH_FRACTION = 0.6  # of page width
 
 def process_logo_image(file_stream) -> tuple[bytes, bytes]:
     """Normalize an uploaded image into (full-opacity PNG bytes, faded
-    watermark PNG bytes). Re-encoding through Pillow (rather than keeping
-    the uploaded bytes as-is) both validates the upload is actually a real
-    image and strips anything else the original file might carry (metadata,
-    non-image payloads appended to the file). Shared by the business-level
-    logo (stored as files) and the per-invoice logo override (stored as
-    BLOBs on the invoice row)."""
+    watermark PNG bytes), stored as BLOBs on the invoice row. Re-encoding
+    through Pillow (rather than keeping the uploaded bytes as-is) both
+    validates the upload is actually a real image and strips anything else
+    the original file might carry (metadata, non-image payloads appended
+    to the file)."""
     img = PILImage.open(file_stream)
     img.verify()
     file_stream.seek(0)
@@ -67,23 +64,11 @@ def process_logo_image(file_stream) -> tuple[bytes, bytes]:
     return full_buf.getvalue(), watermark_buf.getvalue()
 
 
-def save_logo(file_stream) -> None:
-    """Business-level default logo, stored as files (see business_profile
-    table's lack of a logo column — it's simpler as files since there's
-    only ever one, unlike the per-invoice BLOB override)."""
-    full_bytes, watermark_bytes = process_logo_image(file_stream)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    LOGO_PATH.write_bytes(full_bytes)
-    LOGO_WATERMARK_PATH.write_bytes(watermark_bytes)
-
-
-# The invoice form/edit page is a single JSON textarea rather than one
-# input per field — these are the text fields that live directly on the
-# invoices table (everything except id/commission_type_id/base_amount/
-# logo blobs/timestamps, which aren't user-editable text). invoice_number
-# is included and overridable: an empty value means "auto-generate" (new
-# invoices) or "leave unchanged" (editing an existing one) — see
-# parse_invoice_json and the two call sites in webapp.py.
+# The invoice page is a single JSON textarea rather than one input per
+# field — these are the text fields that shape (see parse_invoice_json).
+# invoice_number is included and overridable: leave the suggested value
+# as-is or type your own; either way it's just letterhead text now, not
+# a key into any stored record.
 INVOICE_JSON_FIELDS = [
     "invoice_number",
     "from_name", "from_address", "from_phone", "from_email",
@@ -93,17 +78,16 @@ INVOICE_JSON_FIELDS = [
 ]
 
 
-def default_invoice_json(profile: dict, suggested_invoice_number: str) -> dict:
+def default_invoice_json(suggested_invoice_number: str) -> dict:
     """Pre-fills the new-invoice textarea: the auto-generated invoice
     number (editable — leave it as-is to accept it, or type your own),
-    business-profile defaults for the FROM side, empty strings for
-    everything else, today's date, no items yet."""
+    empty strings for every other field, today's date, no items yet."""
     return {
         "invoice_number": suggested_invoice_number,
-        "from_name": profile.get("name") or "",
-        "from_address": profile.get("address") or "",
-        "from_phone": profile.get("phone") or "",
-        "from_email": profile.get("email") or "",
+        "from_name": "",
+        "from_address": "",
+        "from_phone": "",
+        "from_email": "",
         "to_name": "",
         "to_address": "",
         "to_phone": "",
@@ -111,19 +95,38 @@ def default_invoice_json(profile: dict, suggested_invoice_number: str) -> dict:
         "invoice_date": date.today().isoformat(),
         "due_date": "",
         "payment_method": "",
-        "theme_color": profile.get("theme_color") or DEFAULT_ACCENT,
-        "account_details": profile.get("account_details") or "",
+        "theme_color": DEFAULT_ACCENT,
+        "account_details": "",
         "notes": "",
         "items": [],
     }
 
 
-def invoice_to_json_dict(invoice: dict, items: list[dict]) -> dict:
-    """Pre-fills the edit textarea with an existing invoice's current
-    values, in the same shape default_invoice_json produces."""
-    data = {key: (invoice.get(key) or "") for key in INVOICE_JSON_FIELDS}
-    data["items"] = [{"description": i["description"], "amount": i["amount"]} for i in items]
-    return data
+# A fully filled-in reference example for the "How to use it" tab — every
+# field populated so pasting it as-is and downloading produces a real,
+# complete invoice, not just a schema skeleton.
+EXAMPLE_INVOICE_JSON = {
+    "invoice_number": "INV-00042",
+    "from_name": "Fred Amdev Realty Group",
+    "from_address": "123 Main St, Suite 400\nSpringfield, ST 00000",
+    "from_phone": "555-010-0100",
+    "from_email": "billing@fredamdevrealty.com",
+    "to_name": "Jordan Client",
+    "to_address": "456 Oak Ave\nRiverside, ST 00001",
+    "to_phone": "555-010-0200",
+    "to_email": "jordan@example.com",
+    "invoice_date": "2026-08-01",
+    "due_date": "2026-08-15",
+    "payment_method": "Bank transfer",
+    "theme_color": "#2955a3",
+    "account_details": "Bank: First State Bank\nRouting: 000000000\nAccount: 111111111",
+    "notes": "Thank you for your business — please reference the invoice number with payment.",
+    "items": [
+        {"description": "Buyer's agent commission (2.5% of $350,000)", "amount": 8750.00},
+        {"description": "Transaction coordination fee", "amount": 250.00},
+        {"description": "Document processing", "amount": 75.00},
+    ],
+}
 
 
 def parse_invoice_json(raw: str) -> dict:
@@ -164,96 +167,31 @@ def parse_invoice_json(raw: str) -> dict:
     return {"fields": fields, "items": items}
 
 
-def remove_logo() -> None:
-    for path in (LOGO_PATH, LOGO_WATERMARK_PATH):
-        path.unlink(missing_ok=True)
-
-
-def has_logo() -> bool:
-    return LOGO_PATH.exists()
-
-
 def resolve_accent_color(theme_color: str | None) -> "colors.Color":
-    # theme_color comes from a user-editable field (invoice or profile), so
-    # validate the format before trusting it as a hex color rather than
-    # letting a malformed value raise inside reportlab mid-render.
+    # theme_color comes from a user-editable field, so validate the format
+    # before trusting it as a hex color rather than letting a malformed
+    # value raise inside reportlab mid-render.
     if theme_color and HEX_COLOR_RE.match(theme_color):
         return colors.HexColor(theme_color)
     return colors.HexColor(DEFAULT_ACCENT)
 
 
-def get_business_profile(conn: sqlite3.Connection) -> dict:
-    row = conn.execute("SELECT * FROM business_profile WHERE id = 1").fetchone()
-    if not row:
-        return {"name": "", "address": "", "phone": "", "email": "", "account_details": "", "theme_color": DEFAULT_ACCENT}
-    cols = [c[0] for c in conn.execute("SELECT * FROM business_profile WHERE id = 1").description]
-    return dict(zip(cols, row))
-
-
-def save_business_profile(conn: sqlite3.Connection, name: str, address: str, phone: str, email: str, account_details: str = "", theme_color: str = "") -> None:
-    conn.execute(
-        """
-        INSERT INTO business_profile (id, name, address, phone, email, account_details, theme_color)
-        VALUES (1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            name=excluded.name, address=excluded.address,
-            phone=excluded.phone, email=excluded.email,
-            account_details=excluded.account_details,
-            theme_color=excluded.theme_color,
-            updated_at=CURRENT_TIMESTAMP
-        """,
-        (name, address, phone, email, account_details, theme_color or None),
-    )
-    conn.commit()
-
-
-def next_invoice_number(conn: sqlite3.Connection) -> str:
-    row = conn.execute("SELECT MAX(id) FROM invoices").fetchone()
-    next_id = (row[0] or 0) + 1
-    return f"INV-{next_id:05d}"
-
-
-def compute_items_from_commission_type(conn: sqlite3.Connection, commission_type_id: int, base_amount: float) -> list[dict]:
-    """Evaluate a commission type's rules against base_amount. Percentage
-    rules are value% of base_amount; fixed rules use value as-is. This is
-    a starting point for the invoice's real, editable line items — not
-    the invoice's final total (that's always the sum of invoice_items)."""
-    rows = conn.execute(
-        "SELECT description, calc_type, value FROM commission_type_items "
-        "WHERE commission_type_id = ? ORDER BY sort_order, id",
-        (commission_type_id,),
-    ).fetchall()
-    items = []
-    for description, calc_type, value in rows:
-        if calc_type == "percentage":
-            amount = round(base_amount * (value / 100.0), 2)
-        else:
-            amount = round(value, 2)
-        items.append({"description": description, "amount": amount})
-    return items
+def suggest_invoice_number() -> str:
+    """A friendly starting point for the invoice_number field — invoices
+    aren't stored anywhere, so there's no counter to increment; this just
+    needs to look reasonable and be easy to edit, not be unique."""
+    return f"INV-{date.today().strftime('%Y%m%d')}-{secrets.randbelow(90000) + 10000}"
 
 
 def _money(value: float) -> str:
     return f"${value:,.2f}"
 
 
-def _logo_source(invoice: dict, blob_key: str, default_path: Path):
-    """Per-invoice logo (uploaded on that invoice) wins if present; falls
-    back to the business-level default file; None if neither exists."""
-    blob = invoice.get(blob_key)
-    if blob:
-        return blob
-    if default_path.exists():
-        return default_path
-    return None
-
-
 def _header_logo_flowable(invoice: dict):
-    source = _logo_source(invoice, "logo_image", LOGO_PATH)
+    source = invoice.get("logo_image")
     if source is None:
         return None
-    is_blob = isinstance(source, (bytes, bytearray))
-    with PILImage.open(io.BytesIO(source) if is_blob else source) as im:
+    with PILImage.open(io.BytesIO(source)) as im:
         src_w, src_h = im.size
     max_w, max_h = LOGO_BOX
     scale = min(max_w / src_w, max_h / src_h)
@@ -262,8 +200,7 @@ def _header_logo_flowable(invoice: dict):
     # wrapping it here raises a TypeError deep in reportlab's internals
     # (it tries os.path.splitext() on it, assuming a path/ImageReader-less
     # object).
-    render_source = io.BytesIO(source) if is_blob else str(source)
-    logo = RLImage(render_source, width=src_w * scale, height=src_h * scale)
+    logo = RLImage(io.BytesIO(source), width=src_w * scale, height=src_h * scale)
     logo.hAlign = "CENTER"
     return logo
 
@@ -273,20 +210,18 @@ def _make_watermark_drawer(invoice: dict):
     onFirstPage/onLaterPages — those don't get a way to pass the invoice
     through directly, so this closes over it instead."""
     def _draw(canvas, doc):
-        source = _logo_source(invoice, "logo_watermark", LOGO_WATERMARK_PATH)
+        source = invoice.get("logo_watermark")
         if source is None:
             return
-        is_blob = isinstance(source, (bytes, bytearray))
-        with PILImage.open(io.BytesIO(source) if is_blob else source) as im:
+        with PILImage.open(io.BytesIO(source)) as im:
             src_w, src_h = im.size
         page_w, page_h = letter
         target_w = page_w * WATERMARK_WIDTH_FRACTION
         target_h = src_h * (target_w / src_w)
         x = (page_w - target_w) / 2
         y = (page_h - target_h) / 2
-        render_source = ImageReader(io.BytesIO(source)) if is_blob else str(source)
         canvas.saveState()
-        canvas.drawImage(render_source, x, y, width=target_w, height=target_h, mask="auto")
+        canvas.drawImage(ImageReader(io.BytesIO(source)), x, y, width=target_w, height=target_h, mask="auto")
         canvas.restoreState()
     return _draw
 
@@ -297,6 +232,12 @@ def generate_pdf(invoice: dict, items: list[dict]) -> bytes:
         buf, pagesize=letter,
         topMargin=0.6 * inch, bottomMargin=0.6 * inch,
         leftMargin=0.65 * inch, rightMargin=0.65 * inch,
+        # Embeds real PDF /Title metadata — browsers' built-in PDF viewers
+        # (the live preview iframe included, since that's shown inline via
+        # a blob: URL with no filename of its own) use this as the
+        # suggested "Save As" filename, independent of the real download's
+        # Content-Disposition header.
+        title="INVOICE",
     )
     accent = resolve_accent_color(invoice.get("theme_color"))
 

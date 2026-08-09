@@ -2,6 +2,10 @@
 {% block title %}Dashboard — Muni Packet Crawler{% endblock %}
 {% block content %}
 
+<div class="grid">
+
+<div class="col">
+
 <div class="card">
   <h2 style="margin-top:0">{{ engines.crawl.label }}</h2>
   <p>
@@ -76,6 +80,10 @@
   {% endif %}
 </div>
 
+</div>
+
+<div class="col">
+
 <div class="card">
   <h2 style="margin-top:0">Crawl status</h2>
   <div class="stat-row">
@@ -100,45 +108,67 @@
   <p style="margin-top:12px"><a href="{{ url_for('packets') }}" class="btn secondary">Browse packets →</a></p>
 </div>
 
-<div class="card">
-  <h2 style="margin-top:0">Municipalities by state</h2>
-  <table>
-    <tr><th>State</th><th>Total</th><th>OK</th><th>No packets</th><th>No agenda</th><th>Error</th><th>Unchecked</th></tr>
-    {% for row in state_table %}
-    <tr>
-      <td><a href="{{ url_for('municipalities', state=row.state) }}">{{ row.state }}</a></td>
-      <td>{{ row.total }}</td>
-      <td>{{ row.ok }}</td>
-      <td>{{ row.no_packets_found }}</td>
-      <td>{{ row.no_agenda_found }}</td>
-      <td>{{ row.error }}</td>
-      <td>{{ row.unchecked }}</td>
-    </tr>
-    {% endfor %}
-  </table>
 </div>
 
-<div class="card">
-  <h2 style="margin-top:0">Blocked/unavailable state sources</h2>
-  <p class="muted" style="font-size:13px; margin-top:-6px">Sources checked while researching state directories that were bot-blocked, dead, or otherwise not scrapable at the time — see the README for the full narrative. "Retry" re-fetches the URL right now and records the result; it doesn't build a scraper by itself, just tells you whether it's worth trying again.</p>
-  <table>
-    <tr><th>State</th><th>URL</th><th>Reason</th><th>Category</th><th>Last retried</th><th>Last result</th><th></th></tr>
-    {% for s in blocked_sources %}
-    <tr>
-      <td>{{ s.state }}</td>
-      <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(45) }}</a></td>
-      <td class="muted">{{ s.reason }}</td>
-      <td class="muted">{{ s.category }}</td>
-      <td class="muted">{{ s.last_checked_at or 'never' }}</td>
-      <td class="muted">{{ s.last_status }}</td>
-      <td>
-        <form method="post" action="{{ url_for('retry_blocked_source', source_id=s.id) }}" class="inline">
-          <button type="submit" class="secondary">Retry</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
+<div class="card span-all">
+  <div class="tabs">
+    <button type="button" class="tab-btn active" data-tab="states">Municipalities by state</button>
+    <button type="button" class="tab-btn" data-tab="blocked">Blocked/unavailable state sources</button>
+  </div>
+
+  <div class="tab-panel" data-panel="states">
+    <table>
+      <tr><th>State</th><th>Total</th><th>OK</th><th>No packets</th><th>No agenda</th><th>Error</th><th>Unchecked</th></tr>
+      {% for row in state_table %}
+      <tr>
+        <td><a href="{{ url_for('municipalities', state=row.state) }}">{{ row.state }}</a></td>
+        <td>{{ row.total }}</td>
+        <td>{{ row.ok }}</td>
+        <td>{{ row.no_packets_found }}</td>
+        <td>{{ row.no_agenda_found }}</td>
+        <td>{{ row.error }}</td>
+        <td>{{ row.unchecked }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="tab-panel" data-panel="blocked" hidden>
+    <p class="muted" style="font-size:13px; margin-top:0">Sources checked while researching state directories that were bot-blocked, dead, or otherwise not scrapable at the time — see the README for the full narrative. "Retry" re-fetches the URL right now and records the result; it doesn't build a scraper by itself, just tells you whether it's worth trying again.</p>
+    <table>
+      <tr><th>State</th><th>URL</th><th>Reason</th><th>Category</th><th>Last retried</th><th>Last result</th><th></th></tr>
+      {% for s in blocked_sources %}
+      <tr>
+        <td>{{ s.state }}</td>
+        <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(45) }}</a></td>
+        <td class="muted">{{ s.reason }}</td>
+        <td class="muted">{{ s.category }}</td>
+        <td class="muted">{{ s.last_checked_at or 'never' }}</td>
+        <td class="muted">{{ s.last_status }}</td>
+        <td>
+          <form method="post" action="{{ url_for('retry_blocked_source', source_id=s.id) }}" class="inline">
+            <button type="submit" class="secondary">Retry</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
 </div>
+
+</div>
+
+<script>
+document.querySelectorAll('.tab-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    var target = btn.dataset.tab;
+    document.querySelectorAll('.tab-panel').forEach(function (p) {
+      p.hidden = p.dataset.panel !== target;
+    });
+  });
+});
+</script>
 
 {% endblock %}
