@@ -76,6 +76,27 @@ CREATE TABLE IF NOT EXISTS packets (
 -- get out of sync. To allow a new registration, delete the row directly
 -- (sqlite3 data/muni.db "DELETE FROM auth_totp") and the webapp falls back
 -- to showing the setup page again on the next visit.
+-- One row per applicant/contact record found inside a packet's PDF (or a
+-- PDF it links to) by applicant_extract.py — a packet can yield zero, one,
+-- or several (e.g. a multi-item agenda where several sub-documents each
+-- name a different applicant). email is NOT NULL because the extractor
+-- itself enforces the "no email = not valid" rule before ever inserting a
+-- row — there's no reason to store what was already filtered out.
+CREATE TABLE IF NOT EXISTS packet_applicants (
+    id INTEGER PRIMARY KEY,
+    packet_id INTEGER NOT NULL REFERENCES packets(id),
+    name TEXT,
+    email TEXT NOT NULL,
+    address TEXT,
+    phone TEXT,
+    property_address TEXT,
+    summary TEXT,
+    source_url TEXT,
+    extracted_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_packet_applicants_packet ON packet_applicants(packet_id);
+
 CREATE TABLE IF NOT EXISTS auth_totp (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     secret TEXT NOT NULL,
@@ -121,6 +142,12 @@ MIGRATIONS = [
     ("packets", "review_method", "ALTER TABLE packets ADD COLUMN review_method TEXT"),
     ("packets", "applicant_snippet", "ALTER TABLE packets ADD COLUMN applicant_snippet TEXT"),
     ("packets", "priority", "ALTER TABLE packets ADD COLUMN priority INTEGER DEFAULT 0"),
+    # Applicant extraction (see applicant_extract.py / extract_engine.py):
+    # NULL = not yet run. 'extracted' means >=1 packet_applicants row was
+    # saved for this packet; 'no_applicants' means it ran but found nothing
+    # with a valid email; 'error' means the fetch/parse itself failed.
+    ("packets", "extraction_status", "ALTER TABLE packets ADD COLUMN extraction_status TEXT"),
+    ("packets", "extracted_at", "ALTER TABLE packets ADD COLUMN extracted_at TEXT"),
 ]
 
 

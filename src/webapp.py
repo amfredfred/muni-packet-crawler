@@ -61,6 +61,11 @@ ENGINES = {
         "log": BASE_DIR / "data" / "review_engine.log",
         "label": "Review Engine (OCR / applicant check)",
     },
+    "extract": {
+        "script": "extract_engine.py",
+        "log": BASE_DIR / "data" / "extract_engine.log",
+        "label": "Applicant Extraction Engine",
+    },
 }
 _engine_state: dict[str, dict] = {name: {"proc": None, "desc": ""} for name in ENGINES}
 
@@ -206,6 +211,12 @@ def dashboard():
     unreviewed_ocr_packets = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM packets WHERE priority = 1")
     priority_packets = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM packets WHERE extraction_status IS NULL")
+    unextracted_packets = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM packets WHERE extraction_status = 'extracted'")
+    extracted_packets = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM packet_applicants")
+    total_applicants = cur.fetchone()[0]
 
     cur.execute(
         """
@@ -249,6 +260,9 @@ def dashboard():
         reviewed_packets=reviewed_packets,
         unreviewed_ocr_packets=unreviewed_ocr_packets,
         priority_packets=priority_packets,
+        unextracted_packets=unextracted_packets,
+        extracted_packets=extracted_packets,
+        total_applicants=total_applicants,
         state_table=state_table,
         all_states=get_all_states(),
         all_board_types=BOARD_KEYWORDS,
@@ -300,6 +314,31 @@ def engine_start(name: str):
         if rereview:
             args += ["--rereview"]
             desc_parts.append("re-review")
+    elif name == "extract":
+        state = request.form.get("state", "").strip()
+        board_type = request.form.get("board_type", "").strip()
+        limit = request.form.get("limit", "").strip()
+        upcoming_only = request.form.get("upcoming_only") == "1"
+        reextract = request.form.get("reextract") == "1"
+        recursive = request.form.get("recursive") == "1"
+        if state:
+            args += ["--state", state]
+            desc_parts.append(state)
+        if board_type:
+            args += ["--board-type", board_type]
+            desc_parts.append(board_type)
+        if limit:
+            args += ["--limit", limit]
+            desc_parts.append(f"limit {limit}")
+        if upcoming_only:
+            args += ["--upcoming-only"]
+            desc_parts.append("upcoming only")
+        if reextract:
+            args += ["--reextract"]
+            desc_parts.append("re-extract")
+        if recursive:
+            args += ["--recursive"]
+            desc_parts.append("recursive")
 
     log_path = ENGINES[name]["log"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,6 +537,7 @@ def packets():
     reviewed = request.args.get("reviewed", "")
     board_type = request.args.get("board_type", "")
     priority_only = request.args.get("priority_only", "")
+    extraction_status = request.args.get("extraction_status", "")
     within_days = request.args.get("within_days", "10")
     date_from = request.args.get("date_from", "")
     date_to = request.args.get("date_to", "")
@@ -531,6 +571,11 @@ def packets():
         params.append(board_type)
     if priority_only == "1":
         where.append("p.priority = 1")
+    if extraction_status == "none":
+        where.append("p.extraction_status IS NULL")
+    elif extraction_status in ("extracted", "no_applicants", "error"):
+        where.append("p.extraction_status = ?")
+        params.append(extraction_status)
     # Explicit date range — independent of the "which"/within_days quick
     # filters above, so e.g. "show me everything in September" is possible
     # regardless of upcoming/unknown/all. Same NULL caveat as within_days:
@@ -581,6 +626,7 @@ def packets():
         reviewed=reviewed,
         board_type=board_type,
         priority_only=priority_only,
+        extraction_status=extraction_status,
         within_days=within_days,
         date_from=date_from,
         date_to=date_to,
@@ -613,6 +659,115 @@ def mark_reviewed(packet_id: int):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.route("/packets/<int:packet_id>/extracted")
+def packet_extracted(packet_id: int):
+    """Dedicated detail page for one packet's extracted applicant
+    record(s) — linked from the 'Extracted' column badge on the packets
+    list and municipality detail pages. Always queries live (not a static
+    snapshot), so re-running the extraction engine on this packet and
+    reloading this page shows the new result with no separate refresh step."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT p.*, m.name AS municipality_name, m.state FROM packets p
+        JOIN municipalities m ON p.municipality_id = m.id
+        WHERE p.id = ?
+        """,
+        (packet_id,),
+    )
+    packet_rows = dict_rows(cur)
+    if not packet_rows:
+        conn.close()
+        flash("Packet not found.")
+        return redirect(url_for("packets"))
+    packet = packet_rows[0]
+
+    cur.execute(
+        "SELECT * FROM packet_applicants WHERE packet_id = ? ORDER BY email",
+        (packet_id,),
+    )
+    applicants = dict_rows(cur)
+    conn.close()
+
+    return render_template("packet_extracted.html", packet=packet, applicants=applicants)
+
+
+@app.route("/packets/<int:packet_id>/extract", methods=["POST"])
+def extract_single_packet(packet_id: int):
+    """Extract (or re-extract) applicant info for just this one packet,
+    synchronously — for the "extract this one now" button on the packets
+    list, as opposed to the batch engine on the dashboard which processes
+    many packets in the background. Small enough (one PDF + its direct
+    links) to run inline within the request."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT url FROM packets WHERE id = ?", (packet_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        flash("Packet not found.")
+        return redirect(url_for("packets"))
+    url = row[0]
+
+    from applicant_extract import extract_applicants_for_packet
+    try:
+        applicants, errors = extract_applicants_for_packet(url)
+        status = "extracted" if applicants else "no_applicants"
+    except Exception as e:
+        applicants, errors, status = [], [str(e)[:300]], "error"
+
+    cur.execute("DELETE FROM packet_applicants WHERE packet_id = ?", (packet_id,))
+    for a in applicants:
+        cur.execute(
+            """INSERT INTO packet_applicants
+               (packet_id, name, email, address, phone, property_address, summary, source_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (packet_id, a.get("name", ""), a["email"], a.get("address", ""),
+             a.get("phone", ""), a.get("property_address", ""), a.get("summary", ""),
+             a.get("source_url", "")),
+        )
+    cur.execute(
+        "UPDATE packets SET extraction_status = ?, extracted_at = datetime('now') WHERE id = ?",
+        (status, packet_id),
+    )
+    conn.commit()
+    conn.close()
+
+    if applicants:
+        flash(f"Found {len(applicants)} applicant record(s).")
+    else:
+        flash("No applicant record found (no email, or PDF unreadable — see extracted page for detail).")
+    return redirect(url_for("packet_extracted", packet_id=packet_id))
+
+
+@app.route("/extract", methods=["GET", "POST"])
+def extract_url():
+    """Ad-hoc version of the same extraction pipeline for a URL that isn't
+    (or isn't yet) a tracked packet — paste a link, get the same applicant
+    parsing run against it live, no crawl/DB entry required first. Doesn't
+    write anything to the database; this is a standalone utility view, not
+    a way to add packets."""
+    url = request.values.get("url", "").strip()
+    recursive = request.values.get("recursive") == "1"
+    applicants: list[dict] = []
+    errors: list[str] = []
+    ran = False
+
+    if request.method == "POST" and url:
+        ran = True
+        from applicant_extract import extract_applicants_for_packet
+        try:
+            applicants, errors = extract_applicants_for_packet(url, recursive=recursive)
+        except Exception as e:
+            errors = [str(e)[:300]]
+
+    return render_template(
+        "extract_url.html", url=url, recursive=recursive,
+        applicants=applicants, errors=errors, ran=ran,
+    )
 
 
 @app.route("/invoices/preview", methods=["POST"])

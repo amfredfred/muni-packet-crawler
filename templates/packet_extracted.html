@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Extracted — {{ packet.title|truncate(50) }} — Muni Packet Crawler{% endblock %}
+{% block content %}
+
+<p><a href="{{ url_for('municipality_detail', muni_id=packet.municipality_id) }}">← back to {{ packet.municipality_name }}, {{ packet.state }}</a></p>
+
+<div class="card">
+  <h2 style="margin-top:0">{{ packet.title or 'Untitled packet' }}</h2>
+  <p>
+    <a href="{{ packet.url }}" target="_blank" rel="noopener">{{ packet.url }}</a><br>
+    <span class="muted">{{ packet.municipality_name }}, {{ packet.state }} &middot; {{ packet.board_type or 'unknown board' }} &middot; meeting {{ packet.meeting_date or 'unknown date' }}</span>
+  </p>
+  <p>
+    Extraction status:
+    {% if packet.extraction_status == 'extracted' %}
+      <span class="badge ok">extracted</span>
+    {% elif packet.extraction_status == 'no_applicants' %}
+      <span class="badge muted">no applicants found</span>
+    {% elif packet.extraction_status == 'error' %}
+      <span class="badge err">error</span>
+    {% else %}
+      <span class="badge muted">not yet extracted</span>
+    {% endif %}
+    {% if packet.extracted_at %}<span class="muted" style="font-size:12px">&middot; last run {{ packet.extracted_at }}</span>{% endif %}
+  </p>
+  <form method="post" action="{{ url_for('extract_single_packet', packet_id=packet.id) }}" class="inline">
+    <button type="submit">{{ 're-extract now' if packet.extraction_status else 'extract now' }}</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Applicant record(s) ({{ applicants|length }})</h3>
+  {% if applicants %}
+  <table>
+    <tr><th>Name</th><th>Email</th><th>Address</th><th>Phone</th><th>Property Address</th><th>Summary/Description</th><th>Source</th></tr>
+    {% for a in applicants %}
+    <tr>
+      <td>{{ a.name or '—' }}</td>
+      <td>{{ a.email }}</td>
+      <td>{{ a.address or '—' }}</td>
+      <td>{{ a.phone or '—' }}</td>
+      <td>{{ a.property_address or '—' }}</td>
+      <td>{{ a.summary or '—' }}</td>
+      <td class="muted"><a href="{{ a.source_url }}" target="_blank" rel="noopener">{{ (a.source_url or packet.url)|truncate(35) }}</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted" style="font-size:12px; margin-top:10px">
+    Field parsing is heuristic (labeled-form / OpenGov-record / generic-email-context matching) —
+    entries tagged "[OCR-extracted, verify]" in the summary came from a scanned PDF via OCR and
+    are more likely to have misread punctuation or spacing. Treat this as a first pass, not a
+    guarantee — especially for records the generic fallback pulled from free-text correspondence.
+  </p>
+  {% else %}
+  <p class="muted">
+    {% if packet.extraction_status == 'no_applicants' %}
+      Extraction ran but found no record with a valid email (an email-less applicant is dropped by design — see the standing rule in applicant_extract.py).
+    {% elif packet.extraction_status == 'error' %}
+      Extraction failed — check data/extract_engine.log or re-run it above for a fresh error.
+    {% else %}
+      Not extracted yet — click "extract now" above, or run the Applicant Extraction Engine from the dashboard for a batch pass.
+    {% endif %}
+  </p>
+  {% endif %}
+</div>
+
+{% endblock %}

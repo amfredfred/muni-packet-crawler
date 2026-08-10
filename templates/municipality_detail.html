@@ -42,7 +42,7 @@
   </form>
   {% if packets %}
   <table>
-    <tr><th>Date</th><th>Keyword</th><th>Title</th><th>Match</th><th>Via</th><th>Priority</th><th>Reviewed</th><th></th></tr>
+    <tr><th>Date</th><th>Keyword</th><th>Title</th><th>Match</th><th>Via</th><th>Priority</th><th>Extracted</th><th>Reviewed</th><th></th></tr>
     {% for p in packets %}
     <tr data-packet-row="{{ p.id }}" class="{{ 'reviewed' if p.reviewed }}">
       <td>{{ p.meeting_date or '?' }}</td>
@@ -53,6 +53,17 @@
       <td>
         {% if p.priority %}
           <span class="badge ok" title="{{ p.applicant_snippet or '' }}">priority</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if p.extraction_status == 'extracted' %}
+          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge ok" style="text-decoration:none">view →</a>
+        {% elif p.extraction_status == 'no_applicants' %}
+          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge muted" style="text-decoration:none">none found</a>
+        {% elif p.extraction_status == 'error' %}
+          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge err" style="text-decoration:none">error</a>
         {% else %}
           <span class="muted">—</span>
         {% endif %}
