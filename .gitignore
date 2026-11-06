@@ -22,3 +22,6 @@ data/*.log
 
 # Real generated invoices (personal/business documents), not source.
 data/invoice_backups/
+
+# Database backups hold the live TOTP secret, same as muni.db itself.
+data/backups/

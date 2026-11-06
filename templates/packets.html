@@ -44,16 +44,7 @@
     </label>
     <label class="field check-field">
       <input type="checkbox" name="priority_only" value="1" {{ 'checked' if priority_only == '1' }} onchange="this.form.submit()">
-      priority only (applicant+email found)
-    </label>
-    <label class="field">Extracted
-      <select name="extraction_status" onchange="this.form.submit()">
-        <option value="" {{ 'selected' if extraction_status == '' }}>Any extraction state</option>
-        <option value="none" {{ 'selected' if extraction_status == 'none' }}>Not yet extracted</option>
-        <option value="extracted" {{ 'selected' if extraction_status == 'extracted' }}>Extracted (applicant found)</option>
-        <option value="no_applicants" {{ 'selected' if extraction_status == 'no_applicants' }}>Extracted, none found</option>
-        <option value="error" {{ 'selected' if extraction_status == 'error' }}>Error</option>
-      </select>
+      priority only (applicant found)
     </label>
     <button type="submit">Filter</button>
     <span class="muted" style="font-size:13px">{{ total }} result(s)</span>
@@ -62,7 +53,7 @@
 
 <div class="card">
   <table>
-    <tr><th>Date</th><th>Municipality</th><th>Keyword</th><th>Title</th><th>Match</th><th>Priority</th><th>Extracted</th><th>Reviewed</th><th></th></tr>
+    <tr><th>Date</th><th>Municipality</th><th>Keyword</th><th>Title</th><th>Match</th><th>Priority</th><th>Reviewed</th><th></th></tr>
     {% for p in rows %}
     <tr data-packet-row="{{ p.id }}" class="{{ 'reviewed' if p.reviewed }}">
       <td>{{ p.meeting_date or 'unknown' }}</td>
@@ -73,17 +64,6 @@
       <td>
         {% if p.priority %}
           <span class="badge ok" title="{{ p.applicant_snippet or '' }}">priority</span>
-        {% else %}
-          <span class="muted">—</span>
-        {% endif %}
-      </td>
-      <td>
-        {% if p.extraction_status == 'extracted' %}
-          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge ok" style="text-decoration:none">view →</a>
-        {% elif p.extraction_status == 'no_applicants' %}
-          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge muted" style="text-decoration:none">none found</a>
-        {% elif p.extraction_status == 'error' %}
-          <a href="{{ url_for('packet_extracted', packet_id=p.id) }}" class="badge err" style="text-decoration:none">error</a>
         {% else %}
           <span class="muted">—</span>
         {% endif %}
@@ -99,9 +79,9 @@
     {% endfor %}
   </table>
   <div class="pagination">
-    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, extraction_status=extraction_status, within_days=within_days, date_from=date_from, date_to=date_to, page=page-1) }}">← prev</a>{% endif %}
+    {% if page > 1 %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, within_days=within_days, date_from=date_from, date_to=date_to, page=page-1) }}">← prev</a>{% endif %}
     <span class="muted">page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, extraction_status=extraction_status, within_days=within_days, date_from=date_from, date_to=date_to, page=page+1) }}">next →</a>{% endif %}
+    {% if page < total_pages %}<a class="btn secondary" href="{{ url_for('packets', state=state, board_type=board_type, which=which, reviewed=reviewed, priority_only=priority_only, within_days=within_days, date_from=date_from, date_to=date_to, page=page+1) }}">next →</a>{% endif %}
   </div>
 </div>
 

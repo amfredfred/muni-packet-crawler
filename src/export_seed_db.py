@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db import DB_PATH
 
-SEED_TABLES = ["municipalities", "meetings", "packets", "blocked_sources"]
+SEED_TABLES = ["municipalities", "meetings", "packets", "blocked_sources", "opened_links"]
 SEED_DB_PATH = DB_PATH.parent / "muni_seed.db"
 
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Muni Packet Crawler - OCR/applicant-detail packet review (one-shot batch run)
+Description=Muni Packet Crawler - applicant-detail packet review (one-shot batch run)
 After=network.target
 
 [Service]

@@ -20,9 +20,8 @@ sudo bash deploy/install.sh install          # everything: webapp + crawl + revi
 sudo bash deploy/install.sh install webapp
 ```
 
-This installs `python3-venv`, `tesseract-ocr`, and `poppler-utils` via
-`apt`, creates `venv/` and `pip install`s the project into it (with the
-`[ocr]` extra), installs Playwright's Chromium + OS dependencies, then
+This installs `python3-venv` via `apt`, creates `venv/` and `pip install`s
+the project into it, installs Playwright's Chromium + OS dependencies, then
 registers and starts the requested systemd units.
 
 `data/muni.db` doesn't exist yet on a fresh clone — the first thing that
@@ -62,7 +61,7 @@ sudo bash deploy/install.sh update webapp   # re-copies unit files, restarts the
 
 (`update` re-copies the `.service`/`.timer` files in case they changed and
 restarts the webapp; it doesn't touch the venv or re-run `pip install` —
-do that yourself first if `pyproject.toml` changed: `venv/bin/pip install -e ".[ocr]"`.)
+do that yourself first if `pyproject.toml` changed: `venv/bin/pip install -e .`.)
 
 ## Uninstalling
 

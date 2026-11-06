@@ -84,7 +84,6 @@
       <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">Dashboard</a>
       <a href="{{ url_for('municipalities') }}" class="{{ 'active' if request.endpoint == 'municipalities' }}">Municipalities</a>
       <a href="{{ url_for('packets') }}" class="{{ 'active' if request.endpoint == 'packets' }}">Packets</a>
-      <a href="{{ url_for('extract_url') }}" class="{{ 'active' if request.endpoint == 'extract_url' }}">Extract URL</a>
       <a href="{{ url_for('new_municipality') }}" class="{{ 'active' if request.endpoint == 'new_municipality' }}">Add Municipality</a>
       <a href="{{ url_for('invoices') }}" class="{{ 'active' if request.endpoint and request.endpoint.startswith('invoice') }}">Invoices</a>
     </nav>

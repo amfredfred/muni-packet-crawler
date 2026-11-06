@@ -17,7 +17,7 @@ from pathlib import Path
 
 # See webapp.py's matching comment: redirect before anything riskier than
 # the stdlib gets imported, so a crash in a later import (pdf_review, which
-# pulls in pypdf/pytesseract/pdf2image) lands in the log file instead of
+# pulls in pypdf) lands in the log file instead of
 # vanishing silently under pythonw.exe (sys.stdout/stderr start out as
 # None there).
 sys.path.insert(0, str(Path(__file__).resolve().parent))

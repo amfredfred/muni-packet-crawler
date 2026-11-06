@@ -2,7 +2,7 @@
 #
 # One script for everything that needs registering as a Windows Task
 # Scheduler task in this project: the webapp (control panel), the site
-# crawler, and the packet reviewer (OCR/applicant-detail pass).
+# crawler, and the packet reviewer (applicant-detail pass).
 #
 # WHY TASK SCHEDULER INSTEAD OF A WINDOWS SERVICE:
 #   Modeled on trade-relay/execution-engine/install.ps1's approach for the
@@ -17,18 +17,25 @@
 #   of watching a console live.
 #
 # COMPONENTS:
-#   webapp - persistent. Logon trigger, restarts itself on crash via the
-#            task's own RestartCount (no separate watchdog process - unlike
+#   webapp - persistent. Logon trigger (or AtStartup as SYSTEM under
+#            -Boot), restarts itself on crash via the task's own
+#            RestartCount (no separate watchdog process - unlike
 #            trade-relay's MT5 agent, a Flask dev server has no "hangs
 #            without exiting" failure mode tied to an external terminal,
 #            so Task Scheduler's built-in restart-on-failure-exit is
 #            sufficient here).
-#   crawl   - recurring batch job. Runs once daily (or --now for an
-#             immediate one-off run), works through whatever municipalities
-#             are still 'unchecked' plus flags anything freshly added.
-#             Finishes and exits - no persistent process, no watchdog.
-#   review  - recurring batch job, same shape as crawl: reviews whatever
-#             packets don't have a review_method yet (see review_packets.py).
+#   crawl   - recurring batch job by default: runs once daily (or --now for
+#             an immediate one-off run), works through whatever
+#             municipalities are still 'unchecked' plus flags anything
+#             freshly added, then finishes and exits - no persistent
+#             process, no watchdog. Under -Boot it instead becomes
+#             persistent like webapp: runs crawl_sites.py --forever, which
+#             loops crawl passes on its own until stopped (see that
+#             script), with Task Scheduler as the outer safety net that
+#             restarts it if the process itself ever dies.
+#   review  - recurring batch job, same shape as crawl's default mode:
+#             reviews whatever packets don't have a review_method yet (see
+#             review_packets.py). Not affected by -Boot.
 #
 # Usage:
 #   Everything (webapp + crawl + review):
@@ -43,6 +50,20 @@
 #   Run a recurring job's action immediately instead of waiting for its
 #   next scheduled time (webapp is always started regardless of this flag):
 #     powershell -ExecutionPolicy Bypass -File install.ps1 -Now
+#
+#   -Boot: run webapp AND crawl at system startup, before anyone logs on,
+#   as SYSTEM (no stored password needed - SYSTEM already has full control
+#   of this project directory). Requires an elevated (Administrator)
+#   PowerShell session, since registering a task that runs unattended as
+#   SYSTEM needs admin rights. Under -Boot, crawl stops being the nightly
+#   2 AM batch job and instead runs persistently with --forever (see
+#   crawl_sites.py), looping crawl passes until stopped, restarting itself
+#   via Task Scheduler's restart policy if it ever crashes. After a reboot
+#   or restart its first pass picks up any 'unchecked' municipalities, and
+#   every pass after that re-crawls all of them from the start, so a pass
+#   interrupted partway is not resumed:
+#     powershell -ExecutionPolicy Bypass -File install.ps1 -Boot
+#     powershell -ExecutionPolicy Bypass -File install.ps1 -Boot -Component webapp
 
 param(
     [ValidateSet("install", "uninstall", "update")]
@@ -55,7 +76,11 @@ param(
 
     # Also start crawl/review's task immediately after registering it,
     # rather than waiting for the next scheduled trigger time.
-    [switch]$Now
+    [switch]$Now,
+
+    # Run persistent components (webapp, and crawl too under -Boot) as
+    # SYSTEM at system startup instead of as the current user at logon.
+    [switch]$Boot
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,8 +88,20 @@ $ProjectDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TaskFolder  = "\Muni Packet Crawler\"
 $VenvScripts = Join-Path $ProjectDir "$VenvName\Scripts"
 
+if ($Boot -and $Action -in @("install", "update")) {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host ""
+        Write-Host "ERROR: -Boot requires an elevated (Administrator) PowerShell session." -ForegroundColor Red
+        Write-Host "  It registers tasks that run as SYSTEM before any user logs on, which" -ForegroundColor Yellow
+        Write-Host "  Task Scheduler only allows an admin to register." -ForegroundColor Yellow
+        Write-Host "  Right-click PowerShell -> Run as Administrator, then re-run this command." -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 # ── Runs install/uninstall/update for exactly one component ────────────────
-function Invoke-ForComponent([string]$component, [string]$action) {
+function Invoke-ForComponent([string]$component, [string]$action, [bool]$boot) {
     # Console-script wrappers (muni-webapp.exe etc.) are always built for the
     # console subsystem by setuptools — running one under Task Scheduler's
     # "AtLogOn, Interactive" trigger leaves a visible terminal window sitting
@@ -87,15 +124,26 @@ function Invoke-ForComponent([string]$component, [string]$action) {
         }
         "crawl" {
             $taskName      = "Muni Crawl"
-            $description   = "Muni Packet Crawler - crawls municipal sites for meeting packets (recurring daily batch)"
             $installMarker = Join-Path $VenvScripts "muni-crawl.exe"
             $exe           = $pythonw
-            $scriptArgs    = "`"$(Join-Path $ProjectDir 'src\crawl_sites.py')`""
-            $persistent    = $false
+            if ($boot) {
+                # -Boot: persistent forever-loop instead of a nightly batch
+                # job - see crawl_sites.py's --forever (loops crawl passes
+                # until stopped, sleeping --interval seconds between them;
+                # the first pass covers 'unchecked' municipalities and every
+                # later pass re-crawls all of them).
+                $description = "Muni Packet Crawler - crawls municipal sites for meeting packets (runs forever, restarts at boot)"
+                $scriptArgs  = "`"$(Join-Path $ProjectDir 'src\crawl_sites.py')`" --forever"
+                $persistent  = $true
+            } else {
+                $description = "Muni Packet Crawler - crawls municipal sites for meeting packets (recurring daily batch)"
+                $scriptArgs  = "`"$(Join-Path $ProjectDir 'src\crawl_sites.py')`""
+                $persistent  = $false
+            }
         }
         "review" {
             $taskName      = "Muni Review"
-            $description   = "Muni Packet Crawler - OCR/applicant-detail pass over saved packets (recurring daily batch)"
+            $description   = "Muni Packet Crawler - applicant-detail pass over saved packets (recurring daily batch)"
             $installMarker = Join-Path $VenvScripts "muni-review-packets.exe"
             $exe           = $pythonw
             $scriptArgs    = "`"$(Join-Path $ProjectDir 'src\review_packets.py')`""
@@ -147,8 +195,7 @@ function Invoke-ForComponent([string]$component, [string]$action) {
             Write-Host "ERROR: $installMarker not found." -ForegroundColor Red
             Write-Host "  Set up the venv and install this project into it first:" -ForegroundColor Yellow
             Write-Host "    python -m venv $VenvName" -ForegroundColor Yellow
-            Write-Host "    $VenvName\Scripts\pip install -e `".[ocr]`"" -ForegroundColor Yellow
-            Write-Host "  (the [ocr] extra is optional - only needed for the OCR fallback in review)" -ForegroundColor DarkGray
+            Write-Host "    $VenvName\Scripts\pip install -e ." -ForegroundColor Yellow
             exit 1
         }
         if (-not (Test-Path -LiteralPath $exe)) {
@@ -168,7 +215,21 @@ function Invoke-ForComponent([string]$component, [string]$action) {
 
         $taskAction = New-ScheduledTaskAction -Execute $exe -Argument $scriptArgs -WorkingDirectory $ProjectDir
 
-        if ($persistent) {
+        if ($persistent -and $boot) {
+            # Runs before anyone logs on - AtStartup instead of AtLogOn, as
+            # SYSTEM instead of the current user (SYSTEM needs no stored
+            # password and already has full control of $ProjectDir).
+            $trigger = New-ScheduledTaskTrigger -AtStartup
+            $trigger.Delay = "PT30S"  # let disk/network come up first
+            $settings = New-ScheduledTaskSettingsSet `
+                -MultipleInstances  IgnoreNew `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) `
+                -RestartCount       10 `
+                -RestartInterval    (New-TimeSpan -Minutes 1) `
+                -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable
+        } elseif ($persistent) {
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
             $trigger.Delay = "PT10S"
             $settings = New-ScheduledTaskSettingsSet `
@@ -194,10 +255,17 @@ function Invoke-ForComponent([string]$component, [string]$action) {
                 -StartWhenAvailable
         }
 
-        $principal = New-ScheduledTaskPrincipal `
-            -UserId    "$env:USERDOMAIN\$env:USERNAME" `
-            -LogonType Interactive `
-            -RunLevel  Limited
+        if ($persistent -and $boot) {
+            $principal = New-ScheduledTaskPrincipal `
+                -UserId    "SYSTEM" `
+                -LogonType ServiceAccount `
+                -RunLevel  Highest
+        } else {
+            $principal = New-ScheduledTaskPrincipal `
+                -UserId    "$env:USERDOMAIN\$env:USERNAME" `
+                -LogonType Interactive `
+                -RunLevel  Limited
+        }
 
         Register-ScheduledTask `
             -TaskName    $taskName `
@@ -242,5 +310,5 @@ $components = if ($Component -eq "all") { @("webapp", "crawl", "review") } else 
 foreach ($c in $components) {
     Write-Host ""
     Write-Host "=== $Action $c ===" -ForegroundColor Cyan
-    Invoke-ForComponent -component $c -action $Action
+    Invoke-ForComponent -component $c -action $Action -boot $Boot.IsPresent
 }

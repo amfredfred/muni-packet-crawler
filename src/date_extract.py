@@ -26,6 +26,7 @@ Extraction order matters and is deliberately narrow-to-wide:
 
 import re
 from datetime import date, datetime
+from urllib.parse import unquote
 
 from bs4.element import Tag
 
@@ -51,6 +52,16 @@ ORDINAL_SUFFIX_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)\b", re.I)
 # 2029-03-12 instead of the real 2025-12-29 sitting right there). Confirmed
 # live on Stockbridge, MI packets before this fix.
 NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})([-/.])(\d{1,2})\2(\d{2}|\d{4})\b")
+
+# Date shapes that only turn up in URLs and filenames: no separators at all,
+# as in CivicPlus AgendaCenter's ".../ViewFile/Agenda/_11102026-123" (MMDDYYYY)
+# and names like "20261116-Warrant.pdf" (YYYYMMDD), or year-first with dashes.
+# The digit lookarounds stop these firing inside longer numbers such as
+# upload timestamps; "/" is left out of ISO_URL_RE so that a WordPress
+# ".../2026/03/" upload folder is never read as a date.
+COMPACT_MDY_RE = re.compile(r"(?<!\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(20\d{2})(?!\d)")
+COMPACT_YMD_RE = re.compile(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)")
+ISO_URL_RE = re.compile(r"(?<!\d)(20\d{2})[-_.](\d{1,2})[-_.](\d{1,2})(?!\d)")
 
 SPANISH_MONTHS = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -108,6 +119,22 @@ def _try_parse_numeric(text: str) -> date | None:
         return None
 
 
+def _try_parse_url_date(href: str) -> date | None:
+    for pattern, month_first in ((COMPACT_MDY_RE, True), (COMPACT_YMD_RE, False), (ISO_URL_RE, False)):
+        m = pattern.search(href)
+        if not m:
+            continue
+        a, b, c = (int(g) for g in m.groups())
+        year, month, day = (c, a, b) if month_first else (a, b, c)
+        try:
+            parsed = _plausible(date(year, month, day))
+        except ValueError:
+            continue
+        if parsed:
+            return parsed
+    return None
+
+
 def _try_parse_spanish(text: str) -> date | None:
     m = SPANISH_DATE_RE.search(text)
     if not m:
@@ -138,7 +165,7 @@ def _try_parse_any(text: str) -> date | None:
     return _try_parse_numeric(text) or _try_parse_spanish(text)
 
 
-def _find_nearby_row(anchor: Tag) -> Tag | None:
+def find_nearby_row(anchor: Tag) -> Tag | None:
     """Nearest structural row ancestor, only within MAX_ANCESTOR_HOPS —
     returns None (rather than an arbitrary distant ancestor) if none is
     found that close, since a container that wide is usually shared by
@@ -160,16 +187,16 @@ def extract_meeting_date(anchor: Tag) -> date | None:
     if parsed:
         return parsed
 
-    href = anchor.get("href", "")
-    parsed = _try_parse_any(href.replace("-", " ").replace("/", " "))
+    href = unquote(anchor.get("href", ""))
+    parsed = _try_parse_any(href.replace("-", " ").replace("_", " ").replace("/", " "))
     if parsed:
         return parsed
     # Re-check href with separators intact too — numeric regex needs them.
-    parsed = _try_parse_numeric(href)
+    parsed = _try_parse_numeric(href.replace("_", "-")) or _try_parse_url_date(href)
     if parsed:
         return parsed
 
-    row = _find_nearby_row(anchor)
+    row = find_nearby_row(anchor)
     if row is None:
         return None
 

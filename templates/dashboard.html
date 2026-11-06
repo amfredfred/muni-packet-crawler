@@ -30,9 +30,11 @@
     </select>
     <input type="number" name="limit" placeholder="limit (optional)" style="width:140px">
     <label class="muted" style="font-size:13px"><input type="checkbox" name="recheck" value="1"> re-check already-crawled</label>
+    <label class="muted" style="font-size:13px"><input type="checkbox" name="forever" value="1" onchange="document.getElementById('crawl-interval').disabled = !this.checked"> loop forever</label>
+    <input type="number" id="crawl-interval" name="interval" placeholder="interval sec (default 60)" style="width:170px" disabled>
     <button type="submit">Start crawl</button>
   </form>
-  <p class="muted" style="font-size:12px; margin-top:6px">Leave "re-check" unchecked to only crawl municipalities never checked before — if everything's already been crawled, that finds nothing to do and exits immediately.</p>
+  <p class="muted" style="font-size:12px; margin-top:6px">Leave "re-check" unchecked to only crawl municipalities never checked before — if everything's already been crawled, that finds nothing to do and exits immediately. "Loop forever" keeps re-crawling on the given interval until you click Stop.</p>
   {% endif %}
   {% if engines.crawl.log_tail %}
   <details style="margin-top:10px" {{ 'open' if engines.crawl.running }}>
@@ -44,7 +46,7 @@
 
 <div class="card">
   <h2 style="margin-top:0">{{ engines.review.label }}</h2>
-  <p class="muted" style="font-size:13px; margin-top:-6px">Downloads each packet's PDF, extracts its text (OCR fallback if Tesseract/Poppler are installed), and flags ones naming a specific applicant/owner as priority. This is what runs "the OCR" — there's no separate button for OCR alone, since native text extraction is tried first and OCR only kicks in when that fails.</p>
+  <p class="muted" style="font-size:13px; margin-top:-6px">Downloads each packet's PDF, extracts its text, and flags ones naming a specific applicant/owner as priority. Scanned image PDFs have no text to read and are skipped.</p>
   <p>
     Status:
     {% if engines.review.running %}
@@ -70,55 +72,12 @@
     <label class="muted" style="font-size:13px"><input type="checkbox" name="rereview" value="1"> re-review already-reviewed</label>
     <button type="submit">Start review</button>
   </form>
-  <p class="muted" style="font-size:12px; margin-top:6px">{{ unreviewed_ocr_packets }} packet(s) not yet reviewed. Leave "re-review" unchecked to only process those.</p>
+  <p class="muted" style="font-size:12px; margin-top:6px">{{ unreviewed_pdf_packets }} packet(s) not yet reviewed. Leave "re-review" unchecked to only process those.</p>
   {% endif %}
   {% if engines.review.log_tail %}
   <details style="margin-top:10px" {{ 'open' if engines.review.running }}>
     <summary class="muted">log tail</summary>
     <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ engines.review.log_tail }}</pre>
-  </details>
-  {% endif %}
-</div>
-
-<div class="card">
-  <h2 style="margin-top:0">{{ engines.extract.label }}</h2>
-  <p class="muted" style="font-size:13px; margin-top:-6px">Downloads each packet's PDF (and, optionally, PDFs it links to) and pulls out structured applicant records — name / email / address / phone / property address / summary. Entries with no email are dropped by design. Results land in the "Extracted" column on the Packets page and Municipality pages, each linking to a dedicated detail view.</p>
-  <p>
-    Status:
-    {% if engines.extract.running %}
-      <span class="badge ok">running</span> (PID {{ engines.extract.pid }}{% if engines.extract.desc %}, {{ engines.extract.desc }}{% endif %})
-    {% else %}
-      <span class="badge muted">stopped</span>
-    {% endif %}
-  </p>
-
-  {% if engines.extract.running %}
-  <form method="post" action="{{ url_for('engine_stop', name='extract') }}" class="filters">
-    <span class="muted" style="font-size:13px">Running with: {{ engines.extract.desc or 'default options' }}</span>
-    <button type="submit" class="danger">Stop extraction</button>
-  </form>
-  {% else %}
-  <form method="post" action="{{ url_for('engine_start', name='extract') }}" class="filters">
-    <select name="state">
-      <option value="">All states</option>
-      {% for s in all_states %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
-    </select>
-    <select name="board_type">
-      <option value="">All keywords</option>
-      {% for k in all_board_types %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
-    </select>
-    <input type="number" name="limit" placeholder="limit (optional)" style="width:140px">
-    <label class="muted" style="font-size:13px"><input type="checkbox" name="upcoming_only" value="1"> upcoming only</label>
-    <label class="muted" style="font-size:13px"><input type="checkbox" name="reextract" value="1"> re-extract already-extracted</label>
-    <label class="muted" style="font-size:13px"><input type="checkbox" name="recursive" value="1"> follow links recursively</label>
-    <button type="submit">Start extraction</button>
-  </form>
-  <p class="muted" style="font-size:12px; margin-top:6px">{{ unextracted_packets }} packet(s) not yet extracted. Leave "re-extract" unchecked to only process those.</p>
-  {% endif %}
-  {% if engines.extract.log_tail %}
-  <details style="margin-top:10px" {{ 'open' if engines.extract.running }}>
-    <summary class="muted">log tail</summary>
-    <pre style="max-height:260px; overflow:auto; background:#0f1216; padding:10px; border-radius:6px; font-size:12px">{{ engines.extract.log_tail }}</pre>
   </details>
   {% endif %}
 </div>
@@ -146,18 +105,9 @@
     <div class="stat"><div class="n">{{ upcoming_packets }}</div><div class="l">upcoming</div></div>
     <div class="stat"><div class="n">{{ unknown_date_packets }}</div><div class="l">unknown date</div></div>
     <div class="stat"><div class="n">{{ reviewed_packets }}</div><div class="l">reviewed</div></div>
-    <div class="stat"><div class="n">{{ priority_packets }}</div><div class="l">priority (applicant+email found)</div></div>
+    <div class="stat"><div class="n">{{ priority_packets }}</div><div class="l">priority (applicant found)</div></div>
   </div>
   <p style="margin-top:12px"><a href="{{ url_for('packets') }}" class="btn secondary">Browse packets →</a></p>
-</div>
-
-<div class="card">
-  <h2 style="margin-top:0">Applicant extraction</h2>
-  <div class="stat-row">
-    <div class="stat"><div class="n">{{ extracted_packets }}</div><div class="l">packets with extracted applicant(s)</div></div>
-    <div class="stat"><div class="n">{{ total_applicants }}</div><div class="l">applicant records total</div></div>
-    <div class="stat"><div class="n">{{ unextracted_packets }}</div><div class="l">not yet extracted</div></div>
-  </div>
 </div>
 
 </div>
@@ -170,7 +120,7 @@
 
   <div class="tab-panel" data-panel="states">
     <table>
-      <tr><th>State</th><th>Total</th><th>OK</th><th>No packets</th><th>No agenda</th><th>Error</th><th>Unchecked</th></tr>
+      <tr><th>State</th><th>Total</th><th>OK</th><th>No packets</th><th>No agenda</th><th>Blocked</th><th>Error</th><th>Excluded</th><th>Unchecked</th></tr>
       {% for row in state_table %}
       <tr>
         <td><a href="{{ url_for('municipalities', state=row.state) }}">{{ row.state }}</a></td>
@@ -178,7 +128,9 @@
         <td>{{ row.ok }}</td>
         <td>{{ row.no_packets_found }}</td>
         <td>{{ row.no_agenda_found }}</td>
+        <td>{{ row.blocked }}</td>
         <td>{{ row.error }}</td>
+        <td>{{ row.excluded }}</td>
         <td>{{ row.unchecked }}</td>
       </tr>
       {% endfor %}

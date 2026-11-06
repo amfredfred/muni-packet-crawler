@@ -27,15 +27,21 @@ Per-municipality steps:
      keeps only the board types this project actually cares about.
   4. Record one `meetings` row per (municipality, candidate page) and one
      `packets` row per packet found on it (direct or via a sub-page).
-  5. Update the municipality's site_status ('ok' / 'no_agenda_found' /
-     'error'), agenda_url, and platform (host of the winning candidate, if
-     it's a known civic platform).
+  5. Update the municipality's site_status ('ok' / 'no_packets_found' /
+     'no_agenda_found' / 'blocked' / 'error'), agenda_url, and platform
+     (host of the winning candidate, if it's a known civic platform).
+     'blocked' means the site answered but refused automated access, so it
+     is alive; 'error' means nothing usable came back at all. A town set
+     to 'excluded' is never crawled until it's marked for re-check.
 
 Concurrency: municipalities are processed by a thread pool (--workers,
 default 20) — this is I/O-bound work (waiting on network responses across
 thousands of *distinct* third-party hosts), so threads are effective
 despite the GIL, and hitting many different domains concurrently isn't the
-same politeness concern as hammering one server repeatedly. Each worker
+same politeness concern as hammering one server repeatedly. The exception
+is CivicPlus, which hosts hundreds of these towns on a few networks: those
+requests are spaced out across all workers (see wait_for_civicplus_slot).
+Each worker
 opens its own SQLite connection (required — connections aren't safely
 shared across threads); WAL mode + a busy_timeout (see db.get_connection)
 absorb the brief write conflicts from workers finishing at nearly the same
@@ -46,13 +52,17 @@ just get recorded as site_status='error' rather than crashing the run.
 """
 
 import argparse
+import ipaddress
 import re
+import socket
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 # See webapp.py's matching comment: redirect before anything riskier than
 # the stdlib gets imported, so a crash in a later import (requests, bs4,
@@ -65,55 +75,66 @@ redirect_console_if_headless("crawl_engine.log")
 import requests
 from bs4 import BeautifulSoup
 
-from date_extract import extract_meeting_date, is_upcoming
+from date_extract import extract_meeting_date, find_nearby_row, is_upcoming
 from db import get_connection
-from pdf_review import extract_links_from_pdf, extract_native_text, fetch_pdf_bytes, has_applicant_and_contact
-
-# License/permit-style categories only: for these, a packet is only kept
-# if the actual PDF names a specific applicant/owner AND a contact email —
-# that combination is the real signal of a genuine application (who
-# applied, how to reach them), which routine Planning/Zoning/Historic
-# meeting minutes and agendas legitimately never contain. Applying this to
-# every category was tested against 40 real saved packets first: 0/40
-# passed, since ordinary meeting records don't name an applicant's email —
-# confirming this must stay scoped to license categories, not universal.
-LICENSE_BOARD_TYPES = {
-    "Liquor License Board",
-    "Alcoholic Beverage Control Board",
-    "Board of License Commissioners",
-    "License Commission",
-}
-
-
-def passes_license_content_gate(url: str) -> bool:
-    pdf_bytes = fetch_pdf_bytes(url)
-    if pdf_bytes is None:
-        return False
-    text = extract_native_text(pdf_bytes)
-    if len(text.strip()) < 40:
-        return False  # no OCR fallback here — keep the main crawl fast; a
-        # scanned license PDF can still be caught later via review_packets.py
-    passes, _, _ = has_applicant_and_contact(text)
-    return passes
+from pdf_review import extract_links_from_pdf, fetch_pdf_bytes
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
+# Retried once on a refusal. Some firewalls reject a "Chrome" whose connection
+# doesn't look like one but allow a client that says what it is. Measured on
+# live sites: this let 9% of refused sites through, while using it for every
+# request would lose a few (.colorado.gov) that only accept the browser string.
+IDENTIFIED_HEADERS = {
+    "User-Agent": "muni-packet-crawler/0.1 (public meeting agenda indexer)",
+    "Accept": "text/html,*/*;q=0.8",
+}
+BLOCKED_STATUSES = {401, 403, 406, 429}
+# Requests that look spread across hundreds of different towns can all land on
+# this one provider, and when it was hit too hard it stopped accepting
+# connections from this machine. Everything bound for these networks (ARIN
+# lists them under CivicPlus, LLC) shares one limit, however many workers run.
+CIVICPLUS_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in ("207.38.72.0/21", "208.90.188.0/22", "192.196.0.0/24")
+)
+CIVICPLUS_SECONDS_BETWEEN_REQUESTS = 1.0
+_civicplus_lock = threading.Lock()
+_civicplus_next_slot = 0.0
 REQUEST_TIMEOUT = 15
-CANDIDATE_PAGES_TO_VISIT = 2
+CANDIDATE_PAGES_TO_VISIT = 4
+# Board pages are often just a member list with the documents kept on a
+# shared "Agendas & Minutes" page, so they can't be allowed to fill every slot.
+MAX_BOARD_PAGES = 2
 FOLLOW_LIMIT = 3
 MAX_EMBEDDED_PDF_LINKS = 3  # per source PDF — bounds cost, these are rare
 
 CIVIC_HOSTS = [
     "civicplus.com",
-    "municode.com",
+    "municodemeetings.com",
     "granicus.com",
     "iqm2.com",
     "legistar.com",
     "escribemeetings.com",
     "novusagenda.com",
+    "primegov.com",
+    "civicclerk.com",
+    "civicweb.net",
+    "towncloud.io",
+    "documents-on-demand.com",
 ]
+# CivicPlus is a whole-site CMS, not just a meetings host: only its pages about
+# meetings count, unlike the platforms above that hold nothing else.
+CMS_HOSTS = ("civicplus.com",)
+# Exact hosts that never hold agendas. library.municode.com is the code of
+# ordinances, linked from nearly every city homepage; connect.civicplus.com is
+# the "Powered by CivicPlus" badge.
+NON_AGENDA_HOSTS = {"municode.com", "library.municode.com", "connect.civicplus.com", "calendar.google.com"}
+# Video and social links are often labelled "Board Meetings" but hold no documents.
+NON_AGENDA_DOMAINS = (
+    "youtube.com", "youtu.be", "vimeo.com", "zoom.us", "facebook.com", "twitter.com", "x.com", "instagram.com",
+)
 
 AGENDA_KEYWORDS = re.compile(
     r"\b(agenda|minutes|meeting|calendar|board|commission|planning|zoning|council)\b",
@@ -126,42 +147,65 @@ TEXT_MATCH_RE = re.compile(r"\b(packet|agenda)\b", re.I)
 # (e.g. "Receive Agenda Alerts") — these aren't packets, just noise that
 # passed the keyword check.
 NOISE_RE = re.compile(
-    r"\b(alerts?|subscribe|subscription|notify|notifications?|sign up|newsletters?|rss feed)\b",
+    r"\b(alerts?|subscribe|subscription|notify|notifications?|sign up|newsletters?|rss feed"
+    r"|send to|add to calendar|outlook|google calendar|icalendar|ical)\b",
     re.I,
 )
 PLATFORM_DETAIL_RE = re.compile(
     r"(MeetingDetail|ViewPublisher|AgendaViewer|MeetingView|Meeting\.aspx|Detail\.aspx)", re.I
 )
 MEETING_ROW_RE = re.compile(r"\b(minutes|meeting details|view agenda)\b", re.I)
+# The same AgendaCenter meeting linked again as an HTML view or a listing
+# anchor. The plain PDF and its ?packet=true version are the ones worth keeping.
+AGENDACENTER_DUPLICATE_RE = re.compile(r"/AgendaCenter/(?:ViewFile/Agenda/_\d+-\d+\?html=true|[^/]+/#_\d)", re.I)
+# A link naming the shared listing page, which small towns use for every board.
+AGENDA_PAGE_RE = re.compile(r"\b(agendas?|agenda\s*center|public\s+meetings?)\b", re.I)
+# "Zoning" also names plenty of things that aren't the board's meeting records.
+ZONING_DOC_RE = re.compile(r"\b(ordinances?|maps?|codes?|permits?|applications?|forms?|fees?|regulations?)\b", re.I)
+MAX_ROW_TEXT = 200  # a longer "row" is a layout container, not one item
 DATE_RE = re.compile(r"\b[A-Z][a-z]{2}\s\d{1,2},\s\d{4}\b")
 
-# The board-name filter: land-use/historic-preservation board types,
-# matching the keyword list the sibling Chrome extension
-# (packet-finder-chrome-extension/data.json) searches Google for —
-# "Planning Board", "Historical Commission", "Planning and Zoning
-# Commission", "Board of Adjustments and Appeals", "Planning Commission and
-# Board of Zoning Appeals", "County Zoning Commission", "City Board of
-# Adjustment", "City Zoning Commission", "County Board of Planning", "County
-# Board of Adjustment", "Zoning Board of Adjustment", "Historic Zoning
-# Commission" — PLUS a second category the original 12 didn't cover at all:
-# licensing bodies (liquor/alcohol/business license boards — e.g. many
-# Massachusetts towns have a "Board of License Commissioners" that approves
-# liquor licenses, often for a fee). Rather than match phrases verbatim
-# (real sites word things too many different ways — "Zoning Hearing Board",
-# "Licensing Board for the City of X"), this matches on the underlying
-# concept: a body whose name combines a topic word with a board/commission-
-# type word. Verified this covers all 12 original phrases plus the new
-# licensing ones.
-BOARD_TOPIC_RE = re.compile(
-    r"\b(planning|zoning|historic|historical|adjustments?|appeals"
-    r"|licens\w*|liquor|alcohol\w*)\b",
-    re.I,
-)
+# The boards this project tracks: Planning Commission, Planning Board, Board
+# of Adjustment, anything Zoning, and license/liquor boards. This matches the concept rather
+# than exact phrases, since real sites word things too many ways ("Zoning
+# Hearing Board", "Planning & Zoning", "Board of License Commissioners").
+# "Planning" or "license" alone isn't specific enough (a Planning Department,
+# a "Dog License" form) so those need a board/commission word alongside them;
+# "zoning" is specific enough on its own, which also covers the many sites
+# that label the body "Planning & Zoning" with no such word at all.
+PLANNING_RE = re.compile(r"\bplanning\b", re.I)
+ZONING_RE = re.compile(r"\bzoning\b", re.I)
+ADJUSTMENT_RE = re.compile(r"\bboard\s+of\s+(?:zoning\s+)?adjustments?\b", re.I)
+LIQUOR_RE = re.compile(r"\b(liquor|alcohol\w*)\b", re.I)
+LICENSE_RE = re.compile(r"\blicens\w*\b", re.I)
+NEEDS_BOARD_WORD_RE = re.compile(r"\b(planning|licens\w*|liquor|alcohol\w*)\b", re.I)
+BOARD_TOPIC_RE = re.compile(r"\b(planning|zoning|adjustments?|licens\w*|liquor|alcohol\w*)\b", re.I)
 BOARD_TYPE_RE = re.compile(r"\b(board|commission(?:ers)?)\b", re.I)
+
+BOARD_ABBREVIATIONS = [
+    (re.compile(r"\b(?:zba|bza|zboa|zhb)\b", re.I), "Zoning Board"),
+    (re.compile(r"\bp\s*&\s*z\b|\bpzc\b", re.I), "Planning and Zoning Commission"),
+]
+_CAMEL_CASE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+
+def normalize_title(text: str) -> str:
+    """Spells out what the word-boundary regexes here can't otherwise see:
+    a URL slug ("bryant_planning_commission", since "_" counts as a word
+    character, and "Planning%20Board"), CamelCase ("PlanningBoard"), and the
+    usual short forms ("ZBA Hearing", "P&Z Agenda")."""
+    normalized = _CAMEL_CASE_RE.sub(" ", unquote(text).replace("_", " "))
+    for pattern, full_name in BOARD_ABBREVIATIONS:
+        normalized = pattern.sub(full_name, normalized)
+    return normalized
 
 
 def matches_board_filter(text: str) -> bool:
-    return bool(BOARD_TOPIC_RE.search(text) and BOARD_TYPE_RE.search(text))
+    return bool(
+        ZONING_RE.search(text)
+        or ADJUSTMENT_RE.search(text)
+        or (NEEDS_BOARD_WORD_RE.search(text) and BOARD_TYPE_RE.search(text))
+    )
 
 
 # Small-town sites very often list every body's minutes on ONE shared page
@@ -187,55 +231,36 @@ def names_other_body(text: str) -> bool:
     return bool(OTHER_BODY_TYPE_RE.search(text) and not BOARD_TOPIC_RE.search(text))
 
 
-# The exact 12 keywords from packet-finder-chrome-extension/data.json,
-# exposed so the UI can offer them as a filter dropdown. classify_board_type
-# picks the closest of these for a given packet by word overlap — it's an
-# approximation (real site wording rarely matches one of the 12 verbatim,
-# which is why matches_board_filter above is concept-based rather than
-# exact-match), not a guarantee the packet's board is literally named that.
-BOARD_KEYWORDS = [
-    "Planning Board",
-    "Historical Commission",
-    "Planning and Zoning Commission",
-    "Board of Adjustments and Appeals",
-    "Planning Commission and Board of Zoning Appeals",
-    "County Zoning Commission",
-    "City Board of Adjustment",
-    "City Zoning Commission",
-    "County Board of Planning",
-    "County Board of Adjustment",
-    "Zoning Board of Adjustment",
-    "Historic Zoning Commission",
-    "Liquor License Board",
-    "Alcoholic Beverage Control Board",
-    "Board of License Commissioners",
-    "License Commission",
-]
-_STOPWORDS = {"of", "and", "the"}
-_KEYWORD_WORD_SETS = [
-    (kw, {w.lower() for w in kw.split() if w.lower() not in _STOPWORDS}) for kw in BOARD_KEYWORDS
-]
-
-
-_STEM_LEN = 5  # "licens"[:5] matches license/licensing/licensed alike
-
-
-def _stem(word: str) -> str:
-    return word[:_STEM_LEN] if len(word) > _STEM_LEN else word
+# The UI's keyword filter. classify_board_type picks one for a packet from its
+# wording; matches_board_filter above decides whether it qualifies at all.
+BOARD_KEYWORDS = ["Planning Commission", "Planning Board", "Board of Adjustment", "Zoning", "License", "Liquor"]
+_PLANNING_COMMISSION_RE = re.compile(r"\bplanning\W+(?:(?:and\W+)?zoning\W+)?commission", re.I)
+_PLANNING_BOARD_RE = re.compile(r"\bplanning\W+(?:(?:and\W+)?zoning\W+)?board", re.I)
 
 
 def classify_board_type(text: str) -> str | None:
-    text_stems = {_stem(w) for w in re.findall(r"[a-z]+", text.lower())}
-    best_kw, best_score = None, 0
-    for kw, words in _KEYWORD_WORD_SETS:
-        score = len({_stem(w) for w in words} & text_stems)
-        if score > best_score:
-            best_kw, best_score = kw, score
-    return best_kw
+    if _PLANNING_COMMISSION_RE.search(text):
+        return "Planning Commission"
+    if _PLANNING_BOARD_RE.search(text):
+        return "Planning Board"
+    if ADJUSTMENT_RE.search(text):
+        return "Board of Adjustment"
+    if ZONING_RE.search(text):
+        return "Zoning"
+    if LIQUOR_RE.search(text):
+        return "Liquor"
+    if LICENSE_RE.search(text):
+        return "License"
+    if PLANNING_RE.search(text):
+        return "Planning Commission" if re.search(r"\bcommission", text, re.I) else "Planning Board"
+    return None
 
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 MAX_HEADING_HOPS = 6
+# AgendaCenter gives every row a date as its own heading ("Nov13, 2026"), which
+# would otherwise hide the board name heading the whole list.
+DATE_HEADING_RE = re.compile(r"^[A-Z][a-z]{2,8}\.?\s*\d{1,2},\s*\d{4}")
 
 
 def find_nearby_heading_text(anchor) -> str:
@@ -255,10 +280,13 @@ def find_nearby_heading_text(anchor) -> str:
         for sibling in parent.find_previous_siblings():
             classes = sibling.get("class") or []
             if sibling.name in HEADING_TAGS or any("title" in c for c in classes):
-                return sibling.get_text(strip=True)
-            heading = sibling.find(list(HEADING_TAGS))
+                heading = sibling
+            else:
+                heading = sibling.find(list(HEADING_TAGS))
             if heading:
-                return heading.get_text(strip=True)
+                heading_text = heading.get_text(strip=True)
+                if not DATE_HEADING_RE.match(heading_text):
+                    return heading_text
         node = parent
     return ""
 
@@ -281,22 +309,67 @@ def is_vendor_marketing_domain(hostname: str) -> bool:
     (e.g. civicplus.com/agenda-meeting-management/) whose URL and text both
     contain "agenda", which would otherwise pass the keyword-match check."""
     bare = hostname[4:] if hostname.startswith("www.") else hostname
-    return bare in CIVIC_HOSTS
+    return (
+        bare in CIVIC_HOSTS
+        or bare in NON_AGENDA_HOSTS
+        or any(bare == d or bare.endswith("." + d) for d in NON_AGENDA_DOMAINS)
+    )
 
 
-def fetch(url: str, retries: int = 1) -> requests.Response | None:
+@lru_cache(maxsize=None)
+def is_civicplus_hosted(hostname: str) -> bool:
+    if hostname == "civicplus.com" or hostname.endswith(".civicplus.com"):
+        return True
+    try:
+        address = ipaddress.ip_address(socket.gethostbyname(hostname))
+    except (OSError, ValueError):
+        return False
+    return any(address in network for network in CIVICPLUS_NETWORKS)
+
+
+def wait_for_civicplus_slot(url: str) -> None:
+    """Blocks until it's this request's turn if url is hosted by CivicPlus;
+    returns at once for any other site."""
+    global _civicplus_next_slot
+    try:
+        hostname = urlparse(url).hostname
+    except ValueError:
+        return
+    if not hostname or not is_civicplus_hosted(hostname):
+        return
+    with _civicplus_lock:
+        now = time.monotonic()
+        slot = max(now, _civicplus_next_slot)
+        _civicplus_next_slot = slot + CIVICPLUS_SECONDS_BETWEEN_REQUESTS
+    time.sleep(slot - now)
+
+
+def _get(url: str, headers: dict = HEADERS) -> requests.Response:
+    wait_for_civicplus_slot(url)
+    return requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+
+
+def fetch_with_status(url: str, retries: int = 1) -> tuple[requests.Response | None, int | None]:
+    """Returns (response, http_status); response is None unless the status
+    was 200, and http_status is None if no server answered at all. A site
+    that refuses us is alive, which callers need to tell apart from one
+    that isn't there, even if the retry after a refusal then times out."""
+    refused_with = None
     for attempt in range(retries + 1):
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            if resp.status_code != 200:
-                return None  # not transient (403/404/etc.) — retrying won't help
-            return resp
+            resp = _get(url)
+            if resp.status_code in BLOCKED_STATUSES:
+                refused_with = resp.status_code
+                resp = _get(url, headers=IDENTIFIED_HEADERS)
+            return (resp if resp.status_code == 200 else None), resp.status_code
         except requests.RequestException:
             if attempt < retries:
                 time.sleep(1.5)
-                continue
-            return None
-    return None
+    return None, refused_with
+
+
+def fetch(url: str, retries: int = 1) -> requests.Response | None:
+    return fetch_with_status(url, retries)[0]
 
 
 NAV_SECTION_RE = re.compile(
@@ -338,12 +411,22 @@ def find_nav_section_pages(html: str, base_url: str) -> list[str]:
     return pages
 
 
+BOARD_LINK_SCORE = 1000
+
+
 def find_candidate_pages(html: str, base_url: str) -> list[tuple[str, str]]:
     """Returns (url, link_text) pairs, best-scored first. link_text is kept
     and passed downstream as page context: a link literally reading
     "Planning Board" makes everything found on that page presumptively
-    relevant even if individual item titles don't repeat the board name."""
+    relevant even if individual item titles don't repeat the board name.
+    At most MAX_BOARD_PAGES board links lead the list, so that the shared
+    listing page still gets a visit.
+
+    The civic-host score only applies to a link leaving the site: for a town
+    hosted on one of these platforms, every internal link is on that host,
+    and "Job Opportunities" would otherwise outrank "Agendas & Minutes"."""
     soup = BeautifulSoup(html, "html.parser")
+    base_host = urlparse(base_url).hostname
     scored: dict[str, tuple[int, str]] = {}
 
     for a in soup.find_all("a", href=True):
@@ -359,19 +442,25 @@ def find_candidate_pages(html: str, base_url: str) -> list[tuple[str, str]]:
             continue
 
         text = a.get_text(strip=True)
+        board_name = normalize_title(text)
+        has_keyword = bool(AGENDA_KEYWORDS.search(text) or AGENDA_KEYWORDS.search(href))
         score = 0
-        if matches_board_filter(text):
-            score = 1000  # a link that names the exact board type we want
-        elif is_civic_host(hostname):
+        if matches_board_filter(board_name) and not ZONING_DOC_RE.search(board_name):
+            score = BOARD_LINK_SCORE  # a link that names a board we want
+        elif AGENDA_PAGE_RE.search(text) or AGENDA_PAGE_RE.search(normalize_title(href)):
+            score = 500
+        elif is_civic_host(hostname) and hostname != base_host and (has_keyword or not hostname.endswith(CMS_HOSTS)):
             score = 100
-        elif AGENDA_KEYWORDS.search(text) or AGENDA_KEYWORDS.search(href):
+        elif has_keyword:
             score = 10
 
         if score and score > scored.get(url, (0, ""))[0]:
             scored[url] = (score, text)
 
     ranked = sorted(scored.items(), key=lambda kv: kv[1][0], reverse=True)
-    return [(url, text) for url, (_, text) in ranked]
+    board_pages = [(url, text) for url, (score, text) in ranked if score == BOARD_LINK_SCORE]
+    other_pages = [(url, text) for url, (score, text) in ranked if score != BOARD_LINK_SCORE]
+    return board_pages[:MAX_BOARD_PAGES] + other_pages + board_pages[MAX_BOARD_PAGES:]
 
 
 def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[list[dict], list[dict]]:
@@ -397,7 +486,7 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
             continue
         if not parsed.hostname:
             continue
-        if is_vendor_marketing_domain(parsed.hostname):
+        if is_vendor_marketing_domain(parsed.hostname) or AGENDACENTER_DUPLICATE_RE.search(url):
             continue
 
         text = a.get_text(strip=True)
@@ -409,7 +498,9 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
         if is_pdf or is_text_match:
             if url not in seen_direct:
                 # own_title: the item's OWN specific identity — its link
-                # text and URL only. Deliberately excludes heading_text and
+                # text, URL and table/list row (a listing often names the
+                # body in the row's first column, not the link, which reads
+                # just "Agenda"). Deliberately excludes heading_text and
                 # page_context, both of which are shared by every other
                 # item in the same section/page: if a Council item's own
                 # title were merged with a surrounding "Planning Board"
@@ -420,9 +511,13 @@ def extract_packets(html: str, page_url: str, page_context: str = "") -> tuple[l
                 # through when they sat under a qualifying heading rather
                 # than being reached via page_context. The disqualification
                 # check must run on the item's own text alone.
-                own_title = " ".join(filter(None, [text, url]))
+                row = find_nearby_row(a)
+                row_text = row.get_text(" ", strip=True) if row else ""
+                if len(row_text) > MAX_ROW_TEXT:
+                    row_text = ""
+                own_title = normalize_title(" ".join(filter(None, [text, url, row_text])))
                 heading_text = find_nearby_heading_text(a)
-                external_context = " ".join(filter(None, [heading_text, page_context]))
+                external_context = normalize_title(" ".join(filter(None, [heading_text, page_context])))
                 meeting_date = extract_meeting_date(a)
 
                 if names_other_body(own_title):
@@ -484,12 +579,15 @@ def follow_pdf_embedded_links(packets: list[dict]) -> list[dict]:
     failure or unparseable PDF just yields nothing extra from that one
     packet, not a crawl failure. Inherits the parent packet's date/board
     type — a linked packet found this way is presumptively part of the
-    same meeting/board."""
+    same meeting/board. That inheritance is why only upcoming packets get
+    opened: anything linked from a past or undated one would inherit that
+    date and be dropped, and a listing page can hold years of old PDFs."""
     extra: list[dict] = []
     seen_urls = {p["url"] for p in packets}
     for p in packets:
-        if p["match_reason"] != "pdf":
+        if p["match_reason"] != "pdf" or p["is_upcoming"] != 1:
             continue
+        wait_for_civicplus_slot(p["url"])
         pdf_bytes = fetch_pdf_bytes(p["url"])
         if pdf_bytes is None:
             continue
@@ -512,6 +610,32 @@ def follow_pdf_embedded_links(packets: list[dict]) -> list[dict]:
     return extra
 
 
+def save_packet(cur, meeting_id: int, municipality_id: int, p: dict, found_via: str) -> int:
+    """Returns 1 if this is a real upcoming packet, else 0. Only a confirmed
+    *upcoming* date is worth keeping: past (0) and undeterminable (None) are
+    both skipped, since an undated packet is indistinguishable from an
+    old/archived one and gets re-evaluated on the next crawl of this same
+    page anyway. A link already opened in the app still counts as found
+    (the town does have an upcoming packet) but isn't added back."""
+    if p["is_upcoming"] != 1:
+        return 0
+    cur.execute("SELECT 1 FROM opened_links WHERE url = ?", (p["url"],))
+    if cur.fetchone():
+        return 1
+    if p.get("found_via_pdf_link"):
+        found_via = "pdf_link"
+    cur.execute(
+        """
+        INSERT INTO packets (meeting_id, municipality_id, url, title, match_reason, found_via, meeting_date, is_upcoming, board_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(municipality_id, url) DO UPDATE SET
+            meeting_date=excluded.meeting_date, is_upcoming=excluded.is_upcoming, board_type=excluded.board_type
+        """,
+        (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], found_via, p["meeting_date"], p["is_upcoming"], p["board_type"]),
+    )
+    return 1
+
+
 def save_meeting_and_packets(
     cur, municipality_id: int, source_url: str, direct: list[dict], subpage_results: list[tuple[dict, list[dict]]]
 ) -> int:
@@ -531,39 +655,10 @@ def save_meeting_and_packets(
 
     packet_count = 0
     for p in direct:
-        if p["is_upcoming"] != 1:  # only a confirmed *upcoming* date is worth keeping —
-            continue                # past (0) and undeterminable (None) are both skipped;
-                                     # an undated packet is indistinguishable from an old/
-                                     # archived one and gets re-evaluated on the next crawl
-                                     # of this same page anyway if it's ever re-found.
-        found_via = "pdf_link" if p.get("found_via_pdf_link") else "direct"
-        cur.execute(
-            """
-            INSERT INTO packets (meeting_id, municipality_id, url, title, match_reason, found_via, meeting_date, is_upcoming, board_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(municipality_id, url) DO UPDATE SET
-                meeting_date=excluded.meeting_date, is_upcoming=excluded.is_upcoming, board_type=excluded.board_type
-            """,
-            (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], found_via, p["meeting_date"], p["is_upcoming"], p["board_type"]),
-        )
-        packet_count += 1
-
-    for subpage, sub_direct in subpage_results:
+        packet_count += save_packet(cur, meeting_id, municipality_id, p, "direct")
+    for _subpage, sub_direct in subpage_results:
         for p in sub_direct:
-            if p["is_upcoming"] != 1:
-                continue
-            found_via = "pdf_link" if p.get("found_via_pdf_link") else "subpage"
-            cur.execute(
-                """
-                INSERT INTO packets (meeting_id, municipality_id, url, title, match_reason, found_via, meeting_date, is_upcoming, board_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(municipality_id, url) DO UPDATE SET
-                    meeting_date=excluded.meeting_date, is_upcoming=excluded.is_upcoming, board_type=excluded.board_type
-                """,
-                (meeting_id, municipality_id, p["url"], p["title"], p["match_reason"], found_via, p["meeting_date"], p["is_upcoming"], p["board_type"]),
-            )
-            packet_count += 1
-
+            packet_count += save_packet(cur, meeting_id, municipality_id, p, "subpage")
     return packet_count
 
 
@@ -577,7 +672,9 @@ def prune_stale_packets(conn) -> dict:
     past as time moves forward; nothing else re-checks that after the
     initial save, so is_upcoming is recomputed against *today* for every
     dated packet first (a row's stored value is only as fresh as its last
-    crawl), then anything now-past is deleted too."""
+    crawl), then anything now-past is deleted too. Links already opened in
+    the app go last, with their URL kept in opened_links so a later crawl
+    doesn't add them straight back."""
     cur = conn.cursor()
     today = date.today()
     rows = cur.execute("SELECT id, meeting_date FROM packets WHERE meeting_date IS NOT NULL").fetchall()
@@ -592,8 +689,11 @@ def prune_stale_packets(conn) -> dict:
     undated_deleted = cur.rowcount
     cur.execute("DELETE FROM packets WHERE is_upcoming = 0")
     past_deleted = cur.rowcount
+    cur.execute("INSERT OR IGNORE INTO opened_links (url) SELECT url FROM packets WHERE reviewed = 1")
+    cur.execute("DELETE FROM packets WHERE reviewed = 1")
+    opened_deleted = cur.rowcount
     conn.commit()
-    return {"undated_deleted": undated_deleted, "past_deleted": past_deleted}
+    return {"undated_deleted": undated_deleted, "past_deleted": past_deleted, "opened_deleted": opened_deleted}
 
 
 def crawl_municipality(official_url: str) -> dict:
@@ -604,16 +704,18 @@ def crawl_municipality(official_url: str) -> dict:
     real concurrency once workers were added. All DB writes now happen in
     a single caller thread (see process_one/main) after this returns.
 
-    status is only decided here for the two terminal cases that don't
-    depend on what actually gets saved ('error', 'no_agenda_found'); the
+    status is only decided here for the terminal cases that don't depend
+    on what actually gets saved ('error', 'blocked', 'no_agenda_found'); the
     'ok' vs 'no_packets_found' call depends on how many packets survive the
     past-meeting filter in save_meeting_and_packets, which only runs in the
     writer thread — so that distinction is left as 'has_candidates' here
     and finalized by the caller after the real save."""
     result: dict = {"status": "error", "agenda_url": None, "platform": None, "meetings": []}
 
-    home_resp = fetch(official_url)
+    home_resp, http_status = fetch_with_status(official_url)
     if home_resp is None:
+        if http_status in BLOCKED_STATUSES:
+            result["status"] = "blocked"
         return result
 
     candidates = find_candidate_pages(home_resp.text, home_resp.url)
@@ -699,19 +801,11 @@ def write_result(cur, muni_id: int, result: dict) -> str:
     return status
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--state", help="Only crawl municipalities in this state")
-    parser.add_argument("--limit", type=int, help="Max number of municipalities to crawl this run")
-    parser.add_argument("--recheck", action="store_true", help="Re-crawl even if already checked")
-    parser.add_argument("--workers", type=int, default=20, help="Concurrent worker threads (default 20)")
-    args = parser.parse_args()
-
-    conn = get_connection()
+def run_once(conn, args) -> None:
     cur = conn.cursor()
 
     query = "SELECT id, name, state, official_url FROM municipalities"
-    conditions = []
+    conditions = ["site_status != 'excluded'"]  # switched off; even --recheck leaves these alone
     params: list = []
     if not args.recheck:
         conditions.append("site_status = 'unchecked'")
@@ -745,13 +839,64 @@ def main() -> None:
             print(f"  [{done}/{len(rows)}] {name}, {state}: {status}")
 
     prune_result = prune_stale_packets(conn)
-    conn.close()
 
     print("done —", status_counts)
     print(
-        f"pruned {prune_result['undated_deleted']} undated packet(s) and "
-        f"{prune_result['past_deleted']} now-past packet(s)"
+        f"pruned {prune_result['undated_deleted']} undated, "
+        f"{prune_result['past_deleted']} now-past and "
+        f"{prune_result['opened_deleted']} opened packet(s)"
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state", help="Only crawl municipalities in this state")
+    parser.add_argument("--limit", type=int, help="Max number of municipalities to crawl this run")
+    parser.add_argument("--recheck", action="store_true", help="Re-crawl even if already checked")
+    parser.add_argument("--workers", type=int, default=20, help="Concurrent worker threads (default 20)")
+    parser.add_argument(
+        "--forever",
+        action="store_true",
+        help="Keep crawling in a loop until manually stopped (Ctrl+C). Each pass "
+        "after the first behaves like --recheck, since 'unchecked' rows would "
+        "otherwise run out after the first pass.",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=60.0,
+        help="Seconds to sleep between passes when --forever is set (default 60)",
+    )
+    args = parser.parse_args()
+
+    conn = get_connection()
+    try:
+        if not args.forever:
+            run_once(conn, args)
+            return
+
+        pass_num = 0
+        while True:
+            pass_num += 1
+            print(f"=== pass {pass_num} ===")
+            # after the first pass, unchecked rows are exhausted — force
+            # re-crawling so subsequent passes keep doing real work.
+            if pass_num > 1:
+                args.recheck = True
+            try:
+                run_once(conn, args)
+            except Exception as e:
+                print(f"pass {pass_num} failed: {e}")
+            print(f"sleeping {args.interval}s before next pass (Ctrl+C to stop)...")
+            try:
+                time.sleep(args.interval)
+            except KeyboardInterrupt:
+                print("stopped.")
+                break
+    except KeyboardInterrupt:
+        print("stopped.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

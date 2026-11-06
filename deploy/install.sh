@@ -41,16 +41,16 @@ components_for() {
 }
 
 install_system_deps() {
-    echo "=== Installing system packages (python3-venv, tesseract-ocr, poppler-utils) ==="
+    echo "=== Installing system packages (python3-venv) ==="
     apt-get update -qq
-    apt-get install -y python3-venv python3-pip tesseract-ocr poppler-utils
+    apt-get install -y python3-venv python3-pip
 }
 
 setup_venv() {
     if [[ ! -d "$PROJECT_DIR/venv" ]]; then
         echo "=== Creating venv and installing this project into it ==="
         sudo -u "$DEPLOY_USER" python3 -m venv "$PROJECT_DIR/venv"
-        sudo -u "$DEPLOY_USER" "$PROJECT_DIR/venv/bin/pip" install -e "$PROJECT_DIR[ocr]"
+        sudo -u "$DEPLOY_USER" "$PROJECT_DIR/venv/bin/pip" install -e "$PROJECT_DIR"
         echo "=== Installing Playwright's browser + OS deps (for JS-rendered scrapers) ==="
         sudo -u "$DEPLOY_USER" "$PROJECT_DIR/venv/bin/python" -m playwright install --with-deps chromium
     else

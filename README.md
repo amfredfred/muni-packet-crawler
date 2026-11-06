@@ -18,10 +18,19 @@ municipal sites.
    have much better coverage than Wikidata for small towns. See "State
    coverage" below for the current total and per-state notes.
 2. **`src/crawl_sites.py`** — visits each municipality's official site, ranks
-   candidate meetings/agendas pages (a link naming the exact board type
-   scores highest, then a known civic-platform host, then generic
-   agenda/meeting keywords), and extracts packet/agenda links into `meetings`
-   and `packets`. Three fallback mechanisms beyond a single-page scan:
+   candidate meetings/agendas pages (a link naming a tracked board scores
+   highest, then a shared agendas page, then a known civic-platform host,
+   then generic agenda/meeting keywords), and extracts packet/agenda links
+   into `meetings` and `packets`. Tracked boards are Planning Commission,
+   Planning Board, Board of Adjustment, Zoning, License and Liquor (see
+   `matches_board_filter`).
+   Only packets with a confirmed upcoming date are saved. A site that
+   answers but refuses automated access is marked `blocked` rather than
+   `error`: it is alive, just unreadable by the crawler. A town marked
+   `excluded` is skipped by every crawl, including `--recheck`, until you
+   click "Mark for re-check" on its page. Three fallback
+   mechanisms beyond a single-page scan (requests to CivicPlus, which hosts
+   hundreds of these towns, are limited to one a second across all workers):
    - **Sub-page following**: a page that looks like an individual meeting
      detail row (matches a date or "meeting"/"agenda" text) gets visited too,
      up to `FOLLOW_LIMIT`.
@@ -31,7 +40,7 @@ municipal sites.
      links one level deep before giving up — some sites bury the real link
      behind a multi-level government dropdown menu rather than linking it
      from the homepage at all.
-   - **PDF-embedded-link following**: once a packet PDF is confirmed, that
+   - **PDF-embedded-link following**: once an upcoming packet PDF is found, that
      PDF's own content is scanned for links to *other* PDFs — both real
      link annotations and plain-text URLs printed in the body. Some
      municipalities host the actual packet at a separate URL that's only
@@ -40,14 +49,9 @@ municipal sites.
    docstring for the single-writer-thread architecture that keeps SQLite
    from locking up under concurrent crawls.
 3. **`src/review_packets.py`** + **`src/pdf_review.py`** — best-effort review
-   of each packet's PDF: native text extraction (pypdf) first, OCR
-   (Tesseract + Poppler, see Setup) as a fallback when the PDF has no text
-   layer at all (i.e. it's a scanned image). Flags a packet as `priority`
-   when its text names a specific applicant/owner *and* a contact email —
-   for license/permit-style board types specifically, this same check gates
-   whether the packet is even saved in the first place (see
-   `passes_license_content_gate`), since routine agendas never contain this
-   combination but genuine applications do.
+   of each packet's PDF using native text extraction (pypdf); a scanned
+   image PDF has no text layer and is reported as `no_text_found`. Flags a packet as `priority`
+   when its text names a specific applicant/owner.
 4. **`src/export_seed_db.py`** — exports the static, safe-to-ship tables
    (`municipalities`, `meetings`, `packets`, `blocked_sources`) into a
    separately-committed `data/muni_seed.db`. `data/muni.db` itself is never
@@ -58,14 +62,16 @@ municipal sites.
    scraping effort doesn't have to be repeated per deployment.
 5. **`src/webapp.py`** — the dashboard: start/stop the crawl and review
    engines with live log tails, browse municipalities/packets with filters
-   (state, board type, date range, priority, reviewed status), retry
+   (state, board type, date range, priority, reviewed status; a link you
+   open drops out of the default list and is deleted at the end of the
+   next crawl pass, without coming back on later crawls), retry
    blocked state-directory sources, and the invoice generator (below).
 
 ## Setup
 
 ```bash
 python -m venv venv
-venv\Scripts\pip install -e ".[ocr]"    # [ocr] optional — see OCR below
+venv\Scripts\pip install -e .
 venv\Scripts\python -m playwright install chromium   # only for JS-rendered/bot-blocked scrapers
 
 venv\Scripts\python src/build_index.py               # Wikidata seed (~100 major cities nationwide)
@@ -76,30 +82,6 @@ venv\Scripts\python src/scrapers/<state>.py           # repeat per state — see
 `sqlite3 data/muni.db`. On a fresh clone it doesn't exist yet; it's created
 and auto-seeded from the committed `data/muni_seed.db` the first time
 anything connects (webapp, crawl, review, or any scraper).
-
-### OCR (optional)
-
-Native PDF text extraction (pypdf) handles the large majority of packets —
-OCR is only a fallback for scanned-image PDFs with no text layer at all.
-Requires two system binaries this project does not install for you:
-
-- **Tesseract**: https://github.com/UB-Mannheim/tesseract/wiki — the Windows
-  installer supports a silent, no-admin-rights install to a per-user
-  directory (`tesseract-ocr-w64-setup-*.exe /S /D=C:\Users\<you>\AppData\Local\Programs\Tesseract-OCR`),
-  though it may install to `C:\Program Files\Tesseract-OCR` instead depending
-  on whether UAC grants elevation. `pdf_review.py` checks both locations (and
-  PATH) automatically — no environment-variable changes needed.
-- **Poppler** (for `pdf2image`'s PDF→image rendering): a portable Windows
-  build, e.g. https://github.com/oschwartz10612/poppler-windows/releases —
-  unzip anywhere; `pdf_review.py` also checks
-  `%LOCALAPPDATA%\Programs\poppler\poppler-*\Library\bin\` automatically
-  (globbed, not version-pinned, so a later upgrade doesn't need a code
-  change).
-
-If neither is found, OCR is skipped and `review_method` reports
-`ocr_unavailable` rather than failing — this whole module is a best-effort
-pass regardless (OCR text can carry misrecognized punctuation/spacing, so
-findings are leads to review, not confirmed facts).
 
 ## Running the dashboard
 

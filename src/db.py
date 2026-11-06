@@ -76,27 +76,6 @@ CREATE TABLE IF NOT EXISTS packets (
 -- get out of sync. To allow a new registration, delete the row directly
 -- (sqlite3 data/muni.db "DELETE FROM auth_totp") and the webapp falls back
 -- to showing the setup page again on the next visit.
--- One row per applicant/contact record found inside a packet's PDF (or a
--- PDF it links to) by applicant_extract.py — a packet can yield zero, one,
--- or several (e.g. a multi-item agenda where several sub-documents each
--- name a different applicant). email is NOT NULL because the extractor
--- itself enforces the "no email = not valid" rule before ever inserting a
--- row — there's no reason to store what was already filtered out.
-CREATE TABLE IF NOT EXISTS packet_applicants (
-    id INTEGER PRIMARY KEY,
-    packet_id INTEGER NOT NULL REFERENCES packets(id),
-    name TEXT,
-    email TEXT NOT NULL,
-    address TEXT,
-    phone TEXT,
-    property_address TEXT,
-    summary TEXT,
-    source_url TEXT,
-    extracted_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_packet_applicants_packet ON packet_applicants(packet_id);
-
 CREATE TABLE IF NOT EXISTS auth_totp (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     secret TEXT NOT NULL,
@@ -120,6 +99,14 @@ CREATE TABLE IF NOT EXISTS blocked_sources (
     UNIQUE(state, url)
 );
 
+-- Packet URLs already opened in the app. prune_stale_packets moves them
+-- here and deletes the packet; the crawler skips any URL listed, otherwise
+-- the next pass would simply find the same link and add it back.
+CREATE TABLE IF NOT EXISTS opened_links (
+    url TEXT PRIMARY KEY,
+    opened_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 """
 
 # Added after the initial schema — kept as migrations rather than folded into
@@ -138,20 +125,23 @@ MIGRATIONS = [
     # review_method means not yet reviewed. priority=1 is the actionable
     # signal — a packet whose PDF names a specific applicant/owner (e.g. a
     # liquor-license application), surfaced for follow-up ahead of routine
-    # agendas. This is a best-effort text/OCR heuristic, not a verified fact.
+    # agendas. This is a best-effort text heuristic, not a verified fact.
     ("packets", "review_method", "ALTER TABLE packets ADD COLUMN review_method TEXT"),
     ("packets", "applicant_snippet", "ALTER TABLE packets ADD COLUMN applicant_snippet TEXT"),
     ("packets", "priority", "ALTER TABLE packets ADD COLUMN priority INTEGER DEFAULT 0"),
-    # Applicant extraction (see applicant_extract.py / extract_engine.py):
-    # NULL = not yet run. 'extracted' means >=1 packet_applicants row was
-    # saved for this packet; 'no_applicants' means it ran but found nothing
-    # with a valid email; 'error' means the fetch/parse itself failed.
-    ("packets", "extraction_status", "ALTER TABLE packets ADD COLUMN extraction_status TEXT"),
-    ("packets", "extracted_at", "ALTER TABLE packets ADD COLUMN extracted_at TEXT"),
 ]
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
+    # Clears tables left behind by features that were removed.
+    conn.execute("DROP TABLE IF EXISTS packet_applicants")
+    conn.execute("DROP TRIGGER IF EXISTS block_removed_municipalities")
+    conn.execute("DROP TABLE IF EXISTS removed_municipalities")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(packets)")}
+    for column in ("extraction_status", "extracted_at"):
+        if column in existing:
+            conn.execute(f"ALTER TABLE packets DROP COLUMN {column}")
+
     for table, column, ddl in MIGRATIONS:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
